@@ -200,7 +200,7 @@ class RateLimiter:
 
 # Pre-configured rate limiter instances for common API patterns
 def create_x_api_limiter() -> RateLimiter:
-    """Create a rate limiter configured for X (Twitter) API limits."""
+    """Create a rate limiter configured for X API limits."""
     limiter = RateLimiter()
 
     # X API v2 rate limits (app-only, subject to change)

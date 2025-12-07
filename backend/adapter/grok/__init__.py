@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import logging
 import os
-import random
 import time
 from datetime import datetime
 from typing import List, Optional, Dict, Any
@@ -14,7 +13,7 @@ from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv, find_dotenv
 from pydantic import BaseModel, Field
 
-from .rate_limiter import RateLimiter, shared_limiter
+from ..rate_limiter import RateLimiter, shared_limiter
 
 load_dotenv(find_dotenv(usecwd=True))
 
@@ -25,8 +24,10 @@ logger = logging.getLogger(__name__)
 try:
     from xai_sdk import Client
     from xai_sdk.chat import system, user
+    XAI_SDK_AVAILABLE = True
 except ImportError:  # xai-sdk might not be installed in local dev
     Client = None  # type: ignore[assignment]
+    XAI_SDK_AVAILABLE = False
 
     def system(content: str) -> str:  # type: ignore[override]
         return content
@@ -93,16 +94,21 @@ class GrokAdapter:
 
     def __init__(self, rate_limiter: Optional[RateLimiter] = None) -> None:
         self.api_key = os.getenv("XAI_API_KEY")
-        self.fast_model = os.getenv("XAI_FAST_MODEL", "grok-2-1212")  # Updated to current fast model
-        self.careful_model = os.getenv("XAI_CAREFUL_MODEL", "grok-2-1212")  # Updated to current model
+        self.fast_model = os.getenv("GROK_MODEL_FAST", "grok-4-1-fast")  # Updated to current fast model
+        self.reasoning_model = os.getenv("GROK_MODEL_REASONING", "grok-4-1-fast-reasoning")  # Updated to current model
         self._client: Optional[Client] = None  # type: ignore[type-arg]
         self.rate_limiter = rate_limiter or shared_limiter
 
-        if Client and self.api_key:
-            self._client = Client(api_key=self.api_key)  # type: ignore[call-arg]
-            logger.info("GrokAdapter initialized with live API client")
+        if XAI_SDK_AVAILABLE and self.api_key:
+            try:
+                self._client = Client(api_key=self.api_key)  # type: ignore[call-arg]
+                logger.info("GrokAdapter initialized with live API client")
+            except Exception as e:
+                logger.warning(f"Failed to initialize xAI client: {e}")
+                self._client = None
         else:
             logger.warning("GrokAdapter initialized without API client (using fallbacks)")
+            self._client = None
 
     @property
     def is_live(self) -> bool:
@@ -119,17 +125,25 @@ class GrokAdapter:
 
         try:
             # Apply rate limiting with appropriate category
-            category = "grok_careful" if model == self.careful_model else "grok_fast"
+            category = "grok_careful" if model == self.reasoning_model else "grok_fast"
             self.rate_limiter.wait_if_needed(category)
 
             logger.debug(f"Making API call to model {model} with rate limit category {category}")
-            chat = self._client.chat.create(model=model)
-            chat.append(system(system_prompt))
-            chat.append(user(user_prompt))
 
-            _, payload = chat.parse(schema)  # type: ignore[arg-type]
-            logger.debug("API call successful")
-            return payload
+            # Try the current API pattern first
+            try:
+                chat = self._client.chat.create(model=model)
+                chat.append(system(system_prompt))
+                chat.append(user(user_prompt))
+                _, payload = chat.parse(schema)  # type: ignore[arg-type]
+                logger.debug("API call successful")
+                return payload
+            except AttributeError:
+                # Fallback for potential API changes in newer versions
+                logger.debug("Trying alternative API pattern")
+                # If the API has changed, we might need different method calls
+                # For now, fall back to the error case
+                raise
 
         except Exception as e:
             logger.error(f"API call failed: {e}", exc_info=True)
@@ -139,8 +153,8 @@ class GrokAdapter:
     # Public high-level helpers
     # ---------------------------------------------------------------------
 
-    def summarize_user(self, handle: str, mocked_posts: List[str]) -> IntelSummary:
-        prompt = "\n".join(mocked_posts[:5]) or "No recent posts"
+    def summarize_user(self, handle: str, recent_posts: List[str]) -> IntelSummary:
+        prompt = "\n".join(recent_posts[:5]) or "No recent posts"
         payload = self._structured_call(
             model=self.fast_model,
             system_prompt="Summarize the following X account for an operator dashboard.",
@@ -149,7 +163,7 @@ class GrokAdapter:
         )
         if isinstance(payload, IntelSummary):
             return payload
-        return self._fallback_intel(handle, mocked_posts)
+        raise RuntimeError(f"Grok API call failed for summarize_user({handle}). No fallback available.")
 
     def monitor_topic(self, topic: str) -> MonitorInsight:
         payload = self._structured_call(
@@ -160,30 +174,30 @@ class GrokAdapter:
         )
         if isinstance(payload, MonitorInsight):
             return payload
-        return self._fallback_monitor(topic)
+        raise RuntimeError(f"Grok API call failed for monitor_topic({topic}). No fallback available.")
 
     def fact_check(self, url: str, text: str) -> FactCheckReport:
         payload = self._structured_call(
-            model=self.careful_model,
+            model=self.reasoning_model,
             system_prompt="Fact check the provided X post. Respond with a structured verdict.",
             user_prompt=f"URL: {url}\nText:\n{text}",
             schema=FactCheckReport,
         )
         if isinstance(payload, FactCheckReport):
             return payload
-        return self._fallback_factcheck(url, text)
+        raise RuntimeError(f"Grok API call failed for fact_check({url}). No fallback available.")
 
     def digest(self, highlights: List[str]) -> DigestOverview:
         prompt = "\n".join(f"- {item}" for item in highlights) or "No highlights yet."
         payload = self._structured_call(
-            model=self.careful_model,
+            model=self.reasoning_model,
             system_prompt="Produce an executive digest for a social-ops dashboard.",
             user_prompt=prompt,
             schema=DigestOverview,
         )
         if isinstance(payload, DigestOverview):
             return payload
-        return self._fallback_digest(highlights)
+        raise RuntimeError(f"Grok API call failed for digest(). No fallback available.")
 
     # ---------------------------------------------------------------------
     # X Terminal specific methods
@@ -232,7 +246,7 @@ Create a brief, structured summary focused on what happened in this specific tim
             payload.post_count = len(posts)
             return payload
 
-        return self._fallback_bar_summary(topic, posts, start_time, end_time)
+        raise RuntimeError(f"Grok API call failed for summarize_bar({topic}). No fallback available.")
 
     def create_topic_digest(self, topic: str, bars_data: List[Dict[str, Any]], lookback_hours: int = 1) -> TopicDigest:
         """
@@ -265,7 +279,7 @@ Bar Summaries ({len(bars_data)} total bars):
 {bars_summary}"""
 
         payload = self._structured_call(
-            model=self.careful_model,
+            model=self.reasoning_model,
             system_prompt="""You are creating an executive digest for a topic's recent activity across multiple time windows.
 Provide contextual analysis of trends, developments, and recommendations for monitoring.""",
             user_prompt=user_prompt,
@@ -275,169 +289,8 @@ Provide contextual analysis of trends, developments, and recommendations for mon
         if isinstance(payload, TopicDigest):
             return payload
 
-        return self._fallback_topic_digest(topic, bars_data, lookback_hours)
+        raise RuntimeError(f"Grok API call failed for create_topic_digest({topic}). No fallback available.")
 
-    # ---------------------------------------------------------------------
-    # Fallbacks keep the UI demoable without live API access.
-    # ---------------------------------------------------------------------
-
-    def _rng(self, seed_source: str) -> random.Random:
-        seed = abs(hash(seed_source)) % (2**32)
-        return random.Random(seed)
-
-    def _fallback_intel(self, handle: str, posts: List[str]) -> IntelSummary:
-        rng = self._rng(handle)
-        sample_posts = posts or [
-            "Sharing a macro take on the energy markets.",
-            "Morning note on AI x politics crossover.",
-            "Retweeting a hot take about creators' economy.",
-        ]
-        sentiment = rng.choice(["positive", "neutral", "mixed", "skeptical"])
-        topics = rng.sample(
-            ["ai", "politics", "creators", "growth", "culture", "sports", "finance"],
-            k=3,
-        )
-        summary = (
-            f"{handle} keeps a tight signal on {topics[0]} and blends it with "
-            f"{topics[1]} commentary. Tone feels {sentiment} with regular "
-            "threads that travel."
-        )
-        recent = [sample_posts[i % len(sample_posts)] for i in range(3)]
-        return IntelSummary(
-            handle=handle,
-            summary=summary,
-            top_topics=topics,
-            sentiment=sentiment,
-            recent_activity=recent,
-        )
-
-    def _fallback_monitor(self, topic: str) -> MonitorInsight:
-        rng = self._rng(topic)
-        tags = rng.sample(
-            ["tech", "politics", "finance", "culture", "controversial", "wholesome"],
-            k=2,
-        )
-        headline = f"Spike in {topic} chatter from {rng.choice(['creators', 'policy wonks', 'finfluencers'])}"
-        score = rng.randint(35, 92)
-        return MonitorInsight(topic=topic, headline=headline, impact_score=score, tags=tags)
-
-    def _fallback_factcheck(self, url: str, text: str) -> FactCheckReport:
-        rng = self._rng(url + text)
-        verdict = rng.choice(["true", "false", "unclear"])
-        confidence = rng.choice(["low", "medium", "high"])
-        rationale = (
-            "Verified against archived statements and recent reporting."
-            if verdict == "true"
-            else "Conflicts with public filings and trusted monitoring feeds."
-            if verdict == "false"
-            else "Source material is thin; more corroboration required."
-        )
-        return FactCheckReport(url=url, verdict=verdict, rationale=rationale, confidence=confidence)
-
-    def _fallback_digest(self, highlights: List[str]) -> DigestOverview:
-        base = highlights or ["Quiet cycle so far — consider running a watch on a priority handle."]
-        recommended = [
-            "Escalate the spiking topic to comms.",
-            "Add a fact-check flag to the contested link.",
-            "Schedule a digest push to the leadership chat.",
-        ]
-        return DigestOverview(
-            generated_at=datetime.utcnow(),
-            highlights=base[:4],
-            risk_outlook="Moderate risk. Sentiment is noisy but nothing is on fire.",
-            recommended_actions=recommended,
-        )
-
-    def _fallback_bar_summary(self, topic: str, posts: List[Dict[str, Any]], start_time: datetime, end_time: datetime) -> BarSummary:
-        """Fallback bar summary when API is unavailable."""
-        rng = self._rng(f"{topic}_{start_time}_{end_time}")
-        post_count = len(posts)
-
-        if post_count == 0:
-            return BarSummary(
-                summary="No posts in this time window",
-                key_themes=[],
-                sentiment="neutral",
-                post_count=0,
-                engagement_level="low"
-            )
-
-        # Generate plausible themes based on topic
-        base_themes = ["discussion", "updates", "reactions", "analysis"]
-        if "tech" in topic.lower() or "ai" in topic.lower():
-            base_themes.extend(["innovation", "development", "trends"])
-        elif "finance" in topic.lower() or "$" in topic:
-            base_themes.extend(["market", "investment", "analysis"])
-
-        themes = rng.sample(base_themes, k=min(3, len(base_themes)))
-        sentiment = rng.choice(["positive", "negative", "neutral", "mixed"])
-        engagement = rng.choice(["low", "medium", "high"])
-
-        summary = f"{post_count} posts about {topic} with {sentiment} sentiment and {engagement} engagement."
-
-        return BarSummary(
-            summary=summary,
-            key_themes=themes,
-            sentiment=sentiment,
-            post_count=post_count,
-            engagement_level=engagement
-        )
-
-    def _fallback_topic_digest(self, topic: str, bars_data: List[Dict[str, Any]], lookback_hours: int) -> TopicDigest:
-        """Fallback topic digest when API is unavailable."""
-        rng = self._rng(f"{topic}_digest_{lookback_hours}")
-
-        total_posts = sum(bar.get('post_count', 0) for bar in bars_data)
-        active_bars = len([b for b in bars_data if b.get('post_count', 0) > 0])
-
-        time_range = f"Last {lookback_hours} hour(s)"
-
-        if total_posts == 0:
-            return TopicDigest(
-                topic=topic,
-                generated_at=datetime.utcnow(),
-                time_range=time_range,
-                overall_summary=f"No significant activity for {topic} in the last {lookback_hours} hour(s)",
-                key_developments=[],
-                trending_elements=[],
-                sentiment_trend="stable",
-                recommendations=["Continue monitoring for emerging activity"]
-            )
-
-        # Generate plausible digest content
-        sentiment_trend = rng.choice(["improving", "declining", "stable", "volatile"])
-
-        developments = [
-            f"Consistent discussion across {active_bars} time windows",
-            f"Total of {total_posts} posts analyzed",
-            "Community engagement shows steady patterns"
-        ]
-
-        trending = rng.sample([
-            "User engagement metrics",
-            "Content quality indicators",
-            "Cross-platform discussion",
-            "Influencer participation"
-        ], k=rng.randint(1, 3))
-
-        recommendations = [
-            "Maintain current monitoring intensity",
-            "Consider increasing check frequency if volume grows",
-            "Prepare for potential topic escalation"
-        ]
-
-        overall_summary = f"{topic} shows {sentiment_trend} activity with {total_posts} total posts across {len(bars_data)} time windows."
-
-        return TopicDigest(
-            topic=topic,
-            generated_at=datetime.utcnow(),
-            time_range=time_range,
-            overall_summary=overall_summary,
-            key_developments=developments,
-            trending_elements=trending,
-            sentiment_trend=sentiment_trend,
-            recommendations=recommendations
-        )
 
 
 __all__ = [

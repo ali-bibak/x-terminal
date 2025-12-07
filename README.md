@@ -67,7 +67,7 @@ x-terminal/
 
 - Python 3.11+
 - Node.js 18+
-- X API Bearer Token ([developer.x.com](https://developer.x.com))
+- X API Bearer Token ([consule.x.com](https://consule.x.com))
 - xAI API Key ([x.ai](https://x.ai))
 
 ### Backend Setup

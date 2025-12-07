@@ -309,10 +309,10 @@ Your summary should focus ONLY on legitimate content. Only include posts that ar
 If there are spam, do not mention it at all. Again, say nothing if no legitimate posts exist.
 
 SENTIMENT SCORING (based on NON-SPAM content only):
-- 0.0-0.2: Very negative (panic, crashes, scams exposed, major bad news)
-- 0.2-0.4: Negative (concerns, doubt, bearish sentiment, criticism)
-- 0.4-0.6: Neutral (mixed signals, factual updates, no clear direction)
-- 0.6-0.8: Positive (optimism, good news, bullish but measured)
+- 0.0-0.3: Very negative (panic, crashes, scams exposed, major bad news)
+- 0.3-0.6: Negative (concerns, doubt, bearish sentiment, criticism)
+- 0.6-0.7: Neutral (mixed signals, factual updates, no clear direction)
+- 0.7-0.8: Positive (optimism, good news, bullish but measured)
 - 0.8-1.0: Very positive (euphoria, major wins, breakthrough news)
 
 ANALYSIS RULES:

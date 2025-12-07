@@ -10,6 +10,6 @@ if [ ! -d "venv" ]; then
 fi
 
 # Run tests using venv's Python directly (more reliable than source activate)
-./venv/bin/python -m pytest "$@"
+./venv/bin/python -m pytest --disable-warnings "$@"
 
 echo "Tests completed!"

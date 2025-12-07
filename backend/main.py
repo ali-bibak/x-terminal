@@ -10,8 +10,9 @@ import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from adapter.grok import GrokAdapter
 from adapter.rate_limiter import RateLimiter
@@ -35,6 +36,54 @@ logger = logging.getLogger(__name__)
 topic_manager: TopicManager = None
 tick_poller: TickPoller = None
 digest_service: DigestService = None
+
+
+class RequestMonitoringMiddleware(BaseHTTPMiddleware):
+    """Middleware to monitor FastAPI requests."""
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        # Skip monitoring for health checks and static files
+        if request.url.path in ["/", "/docs", "/redoc", "/openapi.json"]:
+            return await call_next(request)
+
+        import time
+        start_time = time.time()
+
+        try:
+            response = await call_next(request)
+            latency_ms = (time.time() - start_time) * 1000
+
+            # Record successful request
+            mon = _get_monitor()
+            if mon:
+                # Normalize endpoint name (remove /api/v1 prefix)
+                endpoint = request.url.path.replace("/api/v1", "") or "/"
+
+                # Mark as error for 5xx status codes
+                is_error = response.status_code >= 500
+                mon.metrics.record_request(endpoint, latency_ms, error=is_error)
+
+            return response
+
+        except Exception as e:
+            # Record failed request
+            latency_ms = (time.time() - start_time) * 1000
+            mon = _get_monitor()
+            if mon:
+                endpoint = request.url.path.replace("/api/v1", "") or "/"
+                mon.metrics.record_request(endpoint, latency_ms, error=True)
+
+            # Re-raise the exception
+            raise
+
+
+# Lazy import to avoid circular dependency
+def _get_monitor():
+    try:
+        from monitoring import monitor
+        return monitor
+    except ImportError:
+        return None
 
 
 @asynccontextmanager
@@ -139,6 +188,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Request monitoring middleware
+app.add_middleware(RequestMonitoringMiddleware)
 
 # CORS middleware for frontend
 app.add_middleware(

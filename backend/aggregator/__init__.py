@@ -194,9 +194,17 @@ class TickStore:
 class BarGenerator:
     """
     Generates bars on-demand from raw ticks.
-    
+
     Each bar gets its own fresh Grok summary from the ticks in that window.
     """
+
+    # Lazy import to avoid circular dependency
+    def _get_monitor(self):
+        try:
+            from monitoring import monitor, EventType
+            return monitor
+        except ImportError:
+            return None
     
     def __init__(self, grok_adapter: GrokAdapter, tick_store: TickStore):
         """
@@ -267,7 +275,20 @@ class BarGenerator:
                 )
             except Exception as e:
                 logger.error(f"Failed to generate bar summary: {e}")
-        
+
+        # Record bar generation event
+        mon = self._get_monitor()
+        if mon:
+            mon.metrics.record_bar_generated()
+            mon.activity.add_event(
+                EventType.BAR_GENERATED,
+                topic=topic,
+                resolution=resolution,
+                post_count=len(ticks),
+                has_summary=bar.summary is not None,
+                time_window=f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}"
+            )
+
         return bar
     
     def generate_bars(
@@ -322,6 +343,22 @@ class BarGenerator:
             # Move to previous bar
             bar_end = bar_start
         
+        # Record batch bar generation event
+        mon = self._get_monitor()
+        if mon and bars:
+            bars_with_summaries = sum(1 for bar in bars if bar.summary is not None)
+            total_posts = sum(bar.post_count for bar in bars)
+
+            mon.activity.add_event(
+                EventType.BAR_GENERATED,
+                topic=topic,
+                resolution=resolution,
+                bar_count=len(bars),
+                total_posts=total_posts,
+                bars_with_summaries=bars_with_summaries,
+                batch_generation=True
+            )
+
         return bars  # Already most recent first
 
 

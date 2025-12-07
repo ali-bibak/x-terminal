@@ -434,6 +434,7 @@ class BackfillRequest(BaseModel):
     resolution: str = Field(default="1h", description="Resolution for bars (e.g., '15s', '1m', '1h')")
     count: int = Field(default=5, ge=1, le=100, description="Number of bars to generate")
     generate_summaries: bool = Field(default=True, description="Generate Grok summaries (slower)")
+    poll_first: bool = Field(default=True, description="Poll for new ticks before generating bars")
 
 
 class BackfillResponse(BaseModel):
@@ -442,6 +443,9 @@ class BackfillResponse(BaseModel):
     message: str
     bars_generated: int = 0
     bars_with_summaries: int = 0
+    bars_with_posts: int = 0
+    total_posts: int = 0
+    ticks_collected: int = 0
     resolution: str = ""
     time_range: Optional[str] = None
 
@@ -479,12 +483,54 @@ async def backfill_bars(
         )
     
     try:
+        # Optionally poll for new ticks first
+        ticks_before = manager.tick_store.get_tick_count(topic.label)
+        
+        if request.poll_first:
+            # Poll multiple times to collect more data
+            for _ in range(3):
+                await manager.poll_topic(topic_id)
+        
+        ticks_after = manager.tick_store.get_tick_count(topic.label)
+        
+        # Warn if no ticks
+        if ticks_after == 0:
+            return BackfillResponse(
+                success=False,
+                message="No ticks available. Poll the topic first to collect data, then backfill.",
+                resolution=request.resolution
+            )
+        
+        # Get tick time range to generate bars that actually have data
+        tick_range = manager.tick_store.get_time_range(topic.label)
+        if not tick_range:
+            return BackfillResponse(
+                success=False,
+                message="No tick time range available",
+                resolution=request.resolution
+            )
+        
+        oldest_tick, newest_tick = tick_range
+        resolution_seconds = RESOLUTION_MAP[request.resolution]
+        
+        # Calculate how many bars can have data based on tick time span
+        tick_span_seconds = (newest_tick - oldest_tick).total_seconds()
+        max_bars_with_data = max(1, int(tick_span_seconds / resolution_seconds) + 1)
+        
+        # Limit count to bars that can actually have data
+        effective_count = min(request.count, max_bars_with_data)
+        
+        # Generate bars ending AFTER the newest tick
+        from datetime import timedelta
+        end_time = newest_tick + timedelta(seconds=resolution_seconds)
+        
         # Generate bars directly from tick data (bypassing BarStore cache)
         bars = await manager.bar_generator.generate_bars_async(
             topic=topic.label,
             resolution=request.resolution,
-            limit=request.count,
-            generate_summaries=request.generate_summaries
+            limit=effective_count,
+            generate_summaries=request.generate_summaries,
+            end_time=end_time
         )
         
         # Store in BarStore for future fast access
@@ -492,6 +538,8 @@ async def backfill_bars(
             await manager.bar_store.add_bar(bar)
         
         bars_with_summaries = sum(1 for b in bars if b.summary is not None)
+        bars_with_posts = sum(1 for b in bars if b.post_count > 0)
+        total_posts = sum(b.post_count for b in bars)
         
         # Calculate time range
         if bars:
@@ -501,11 +549,19 @@ async def backfill_bars(
         else:
             time_range = None
         
+        # Build message with info about limiting
+        msg = f"Generated {len(bars)} {request.resolution} bars ({bars_with_posts} with posts, {bars_with_summaries} with summaries)"
+        if effective_count < request.count:
+            msg += f" [limited from {request.count} to {effective_count} based on tick data span]"
+        
         return BackfillResponse(
             success=True,
-            message=f"Generated {len(bars)} {request.resolution} bars",
+            message=msg,
             bars_generated=len(bars),
             bars_with_summaries=bars_with_summaries,
+            bars_with_posts=bars_with_posts,
+            total_posts=total_posts,
+            ticks_collected=ticks_after - ticks_before if request.poll_first else 0,
             resolution=request.resolution,
             time_range=time_range
         )

@@ -69,8 +69,8 @@ class TestRateLimiter:
         for i in range(10):
             limiter.wait_if_needed("test")
 
-        # Bucket should be empty
-        assert limiter.token_buckets["test"] == 0
+        # Bucket should be nearly empty (allow tiny refill during test execution)
+        assert limiter.token_buckets["test"] < 0.01
 
 
 class TestGrokAdapter:
@@ -206,11 +206,18 @@ class TestGrokAdapter:
 
         with patch.dict('os.environ', {'XAI_API_KEY': 'test_key'}):
             adapter = GrokAdapter()
-            posts = [{"author": "user1", "text": "Test post"}]
             start_time = datetime.now(timezone.utc)
             end_time = start_time + timedelta(minutes=5)
+            ticks = [Tick(
+                id="post1",
+                author="user1",
+                text="Test post",
+                timestamp=start_time,
+                metrics={"like_count": 10},
+                topic="test_topic"
+            )]
 
-            result = adapter.summarize_bar("test_topic", posts, start_time, end_time)
+            result = adapter.summarize_bar("test_topic", ticks, start_time, end_time)
 
             assert isinstance(result, BarSummary)
             assert result.summary == "Test summary"

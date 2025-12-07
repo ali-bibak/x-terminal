@@ -25,38 +25,40 @@ X Terminal aggregates X posts into time-based "bars" (like market data) and uses
 ┌─────────────────┐     HTTP/JSON     ┌─────────────────────────────────────────┐
 │                 │◄────────────────► │  Python FastAPI Backend                 │
 │  Next.js/Svelte │                   │                                         │
-│  Frontend       │                   │  ┌─────────┐  ┌─────────────┐           │
-│                 │                   │  │ X       │  │ Grok        │           │
-└─────────────────┘                   │  │ Adapter │  │ Adapter     │           │
-                                      │  └────┬────┘  └──────┬──────┘           │
-                                      │       │              │                  │
-                                      │  ┌────▼──────────────▼─────────────┐   │
-                                      │  │   TickStore (raw posts)         │   │
-                                      │  │   BarGenerator (on-demand)      │   │
-                                      │  │   TopicManager / DigestService  │   │
-                                      │  └─────────────────────────────────┘   │
-                                      │                                         │
-                                      │  ┌─────────────────────────────────┐   │
-                                      │  │   📊 Monitoring                  │   │
-                                      │  │   (metrics, rate limits, health) │   │
-                                      │  └─────────────────────────────────┘   │
-                                      └─────────────────────────────────────────┘
-                                                    │
-                                      ┌─────────────┴─────────────┐
-                                      ▼                           ▼
-                               X API (Twitter)              xAI Grok API
+│  Frontend       │                   │  ┌───────────────────────────────────┐  │
+│                 │                   │  │   Core / Aggregation Layer        │  │
+│                 │                   │  ├───────────────────────────────────┤  │
+│                 │                   │  │  TopicManager   DigestService     │  │
+│                 │                   │  │  TickStore      BarStore          │  │
+│                 │                   │  │  BarGenerator   BarScheduler      │  │
+│                 │                   │  └────────┬───────────────┬──────────┘  │
+│                 │                   │           │               │             │
+│                 │                   │  ┌────────▼──────┐  ┌─────▼──────────┐  │
+│                 │                   │  │ X Adapter     │  │ Grok Adapter   │  │
+│                 │                   │  │ (Polling/Rate)│  │ (Prompt Eng.)  │  │
+│                 │                   │  └────────┬──────┘  └─────┬──────────┘  │
+│                 │                   │           │               │             │
+│                 │                   └───────────┼───────────────┼─────────────┘
+│                 │                               │               │
+│                 │                   ┌───────────▼───┐       ┌───▼──────────┐
+│                 │                   │ X API         │       │ xAI Grok API │
+│                 │                   └───────────────┘       └──────────────┘
+└─────────────────┘
 ```
 
-### On-Demand Bar Generation
+### Low-Latency Architecture
 
-X Terminal stores raw ticks and generates bars **on-demand** at any resolution:
+X Terminal uses a hybrid approach for speed and quality:
 
-1. **TickStore** — Raw posts stored per topic
-2. **BarGenerator** — Groups ticks into bars at requested resolution + Grok summaries
+1. **TickStore** — Stores raw X posts (ticks) in memory
+2. **BarScheduler** — Periodically generates bars + Grok summaries in background
+3. **BarStore** — Caches pre-computed bars for instant GET access (~10ms)
+4. **On-Demand Fallback** — If bars aren't cached, generates them instantly from ticks (without summaries) to ensure responsiveness
 
 This enables:
-- ⚡ Instant switching between 15s, 1m, 5m views
-- 🎯 High-quality summaries (always from raw data)
+- ⚡ **Instant dashboards** (always fast)
+- 🤖 **AI Summaries** (populated asynchronously)
+- 🔄 **Automatic backfilling** of historical data
 
 ## 📁 Project Structure
 
@@ -68,8 +70,8 @@ x-terminal/
 │   │   ├── grok/           # Grok AI adapter
 │   │   ├── models.py       # Shared Pydantic models (Tick)
 │   │   └── rate_limiter.py # Shared rate limiting
-│   ├── aggregator/         # TickStore, BarGenerator, DigestService
-│   ├── core/               # TopicManager, TickPoller
+│   ├── aggregator/         # TickStore, BarGenerator, BarStore
+│   ├── core/               # TopicManager, TickPoller, BarScheduler
 │   ├── api/                # FastAPI routes
 │   ├── monitoring/         # 📊 Metrics, health, activity feed
 │   ├── database/           # SQLite persistence
@@ -109,7 +111,7 @@ cp .env.example .env
 
 # Run the server
 ./run.sh
-# Or: uvicorn main:app --reload --port 8000
+# Or: AUTO_POLL=true ./run.sh (to start polling immediately)
 ```
 
 ### Frontend Setup
@@ -134,9 +136,10 @@ npm run dev
 | `POST` | `/api/v1/topics/{id}/pause` | Pause polling |
 | `POST` | `/api/v1/topics/{id}/resume` | Resume polling |
 | `PATCH` | `/api/v1/topics/{id}/resolution` | Change resolution |
-| `GET` | `/api/v1/topics/{id}/bars` | Get bar timeline |
+| `GET` | `/api/v1/topics/{id}/bars` | Get bar timeline (fast) |
 | `GET` | `/api/v1/topics/{id}/bars/latest` | Get latest bar |
 | `POST` | `/api/v1/topics/{id}/poll` | Manual poll trigger |
+| `POST` | `/api/v1/topics/{id}/backfill` | Generate historical bars + summaries |
 | `POST` | `/api/v1/topics/{id}/digest` | Generate AI digest |
 
 ### Monitoring 📊
@@ -163,21 +166,19 @@ curl -X POST http://localhost:8000/api/v1/topics \
     "resolution": "1m"
   }'
 
-# 2. Poll for data
+# 2. Poll for data (or use AUTO_POLL=true)
 curl -X POST http://localhost:8000/api/v1/topics/tsla/poll
 
-# 3. Get bars at different resolutions
+# 3. Get bars (instant response)
 curl "http://localhost:8000/api/v1/topics/tsla/bars?resolution=15s&limit=50"
-curl "http://localhost:8000/api/v1/topics/tsla/bars?resolution=5m&limit=20"
 
-# 4. Generate digest
+# 4. Backfill historical summaries
+curl -X POST "http://localhost:8000/api/v1/topics/tsla/backfill" \
+  -H "Content-Type: application/json" \
+  -d '{"resolution": "1m", "count": 5}'
+
+# 5. Generate digest
 curl -X POST "http://localhost:8000/api/v1/topics/tsla/digest?lookback_bars=12"
-
-# 5. Check rate limits
-curl http://localhost:8000/api/v1/monitor/rate-limits
-
-# 6. View full dashboard
-curl http://localhost:8000/api/v1/monitor/dashboard
 ```
 
 ## 📊 Monitoring Dashboard
@@ -214,21 +215,8 @@ The monitoring endpoints provide high-ROI observability:
     "x_adapter": {"status": "healthy"},
     "grok_adapter": {"status": "healthy"},
     "poller": {"status": "healthy", "details": {"interval": 15}},
-    "database": {"status": "healthy"}
+    "bar_scheduler": {"status": "healthy"}
   }
-}
-```
-
-### Live Stats (`/monitor/live-stats`)
-```json
-{
-  "uptime": "2h 15m",
-  "topics_active": 3,
-  "total_ticks": 2500,
-  "ticks_per_minute": 18.5,
-  "rate_limit_status": "ok",
-  "grok_calls": 45,
-  "x_api_calls": 120
 }
 ```
 
@@ -325,7 +313,7 @@ Time-windowed aggregate:
   "post_count": 42,
   "total_likes": 5000,
   "summary": "Tesla stock discussed amid...",
-  "sentiment": "positive",
+  "sentiment": 0.85,
   "highlight_posts": ["1234567890", "1234567891"]
 }
 ```
@@ -358,4 +346,3 @@ MIT License - see [LICENSE](LICENSE) for details.
 ---
 
 Built with ❤️ for the xAI Hackathon
-

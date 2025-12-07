@@ -74,7 +74,7 @@ class BarResponse(BaseModel):
     total_quotes: int
     sample_post_ids: List[str]
     summary: Optional[str]
-    sentiment: Optional[str]
+    sentiment: Optional[float] = Field(default=None, description="Sentiment score 0.0-1.0 (0.5=neutral)")
     key_themes: List[str]
     highlight_posts: List[str]
 

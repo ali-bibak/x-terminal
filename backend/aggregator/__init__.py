@@ -199,12 +199,12 @@ class BarGenerator:
     """
 
     # Lazy import to avoid circular dependency
-    def _get_monitor(self):
+    def _get_monitor_and_event_type(self):
         try:
             from monitoring import monitor, EventType
-            return monitor
+            return monitor, EventType
         except ImportError:
-            return None
+            return None, None
     
     def __init__(self, grok_adapter: GrokAdapter, tick_store: TickStore):
         """
@@ -277,8 +277,8 @@ class BarGenerator:
                 logger.error(f"Failed to generate bar summary: {e}")
 
         # Record bar generation event
-        mon = self._get_monitor()
-        if mon:
+        mon, EventType = self._get_monitor_and_event_type()
+        if mon and EventType:
             mon.metrics.record_bar_generated()
             mon.activity.add_event(
                 EventType.BAR_GENERATED,
@@ -344,8 +344,8 @@ class BarGenerator:
             bar_end = bar_start
         
         # Record batch bar generation event
-        mon = self._get_monitor()
-        if mon and bars:
+        mon, EventType = self._get_monitor_and_event_type()
+        if mon and EventType and bars:
             bars_with_summaries = sum(1 for bar in bars if bar.summary is not None)
             total_posts = sum(bar.post_count for bar in bars)
 

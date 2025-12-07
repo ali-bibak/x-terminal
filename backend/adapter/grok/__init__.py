@@ -77,7 +77,7 @@ class BarSummary(BaseModel):
     """Summary for a time-barred window of posts."""
     summary: str = Field(description="Brief summary of what happened in this time window")
     key_themes: List[str] = Field(description="Main topics or themes discussed")
-    sentiment: str = Field(description="Overall sentiment: positive/negative/neutral/mixed")
+    sentiment: float = Field(description="Sentiment score from 0.0 (very negative) to 1.0 (very positive), with 0.5 being neutral")
     post_count: int = Field(description="Number of posts in this bar")
     engagement_level: str = Field(description="low/medium/high engagement level")
     highlight_posts: Optional[List[str]] = Field(default=None, description="1-2 most representative post IDs from this bar")
@@ -239,7 +239,7 @@ class GrokAdapter:
             return BarSummary(
                 summary="No posts in this time window",
                 key_themes=[],
-                sentiment="neutral",
+                sentiment=0.5,  # Neutral
                 post_count=0,
                 engagement_level="low"
             )
@@ -336,9 +336,22 @@ Create a brief, structured summary focused on what happened in this specific tim
         now = datetime.now(timezone.utc)
         
         # Create a summary of the bars with cleaner time formatting
+        # Format sentiment as a label for readability
+        def sentiment_label(s):
+            if s is None:
+                return "unknown"
+            if isinstance(s, (int, float)):
+                if s < 0.3:
+                    return f"negative ({s:.2f})"
+                elif s > 0.7:
+                    return f"positive ({s:.2f})"
+                else:
+                    return f"neutral ({s:.2f})"
+            return str(s)
+        
         bars_summary = "\n".join([
             f"Bar {i+1} ({bar.get('start', 'unknown')}): {bar.get('summary', 'No summary')} "
-            f"({bar.get('post_count', 0)} posts, sentiment: {bar.get('sentiment', 'unknown')})"
+            f"({bar.get('post_count', 0)} posts, sentiment: {sentiment_label(bar.get('sentiment'))})"
             for i, bar in enumerate(bars_data[-12:])  # Last 12 bars
         ])
         

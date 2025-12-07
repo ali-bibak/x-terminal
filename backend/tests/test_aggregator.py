@@ -5,8 +5,8 @@ from datetime import datetime, timezone, timedelta
 from unittest.mock import Mock
 
 from aggregator import (
-    Tick, Bar, BarAggregator, DigestService,
-    RESOLUTION_MAP, get_bar_window, get_previous_bar_window
+    Tick, Bar, BarGenerator, TickStore, DigestService,
+    RESOLUTION_MAP, get_bar_boundaries, get_polling_window
 )
 from adapter.grok import BarSummary, TopicDigest
 
@@ -94,7 +94,7 @@ class TestBar:
         summary = BarSummary(
             summary="Test summary",
             key_themes=["tech", "ai"],
-            sentiment="positive",
+            sentiment=0.8,  # Positive
             post_count=5,
             engagement_level="high",
             highlight_posts=["post1", "post2"]
@@ -110,45 +110,49 @@ class TestBar:
         
         bar_dict = bar.to_dict()
         assert bar_dict["summary"] == "Test summary"
-        assert bar_dict["sentiment"] == "positive"
+        assert bar_dict["sentiment"] == 0.8
         assert bar_dict["key_themes"] == ["tech", "ai"]
 
 
-class TestBarAggregator:
-    """Test the BarAggregator class."""
+class TestBarGenerator:
+    """Test the BarGenerator class."""
 
-    def test_aggregator_init(self):
-        """Test initializing the aggregator."""
+    def test_generator_init(self):
+        """Test initializing the bar generator."""
         mock_grok = Mock()
-        aggregator = BarAggregator(grok_adapter=mock_grok)
+        tick_store = TickStore()
+        generator = BarGenerator(grok_adapter=mock_grok, tick_store=tick_store)
         
-        assert aggregator.default_resolution == "5m"
-        assert aggregator.grok_adapter == mock_grok
+        assert generator.grok_adapter == mock_grok
+        assert generator.tick_store == tick_store
 
-    def test_create_bar_with_ticks(self):
-        """Test creating a bar with ticks."""
+    def test_generate_bar_with_ticks(self):
+        """Test generating a bar with ticks in the store."""
         mock_grok = Mock()
         mock_summary = BarSummary(
             summary="Test summary",
             key_themes=["tech"],
-            sentiment="positive",
+            sentiment=0.75,  # Positive
             post_count=2,
             engagement_level="high"
         )
         mock_grok.summarize_bar.return_value = mock_summary
         
-        aggregator = BarAggregator(grok_adapter=mock_grok)
+        tick_store = TickStore()
+        generator = BarGenerator(grok_adapter=mock_grok, tick_store=tick_store)
         
         now = datetime.now(timezone.utc)
         start = now - timedelta(minutes=5)
         end = now
         
+        # Add ticks to the store
         ticks = [
             create_tick("tick1", topic="$TSLA", timestamp=start + timedelta(minutes=1)),
             create_tick("tick2", topic="$TSLA", timestamp=start + timedelta(minutes=2)),
         ]
+        tick_store.add_ticks("$TSLA", ticks)
         
-        bar = aggregator.create_bar("$TSLA", ticks, start, end)
+        bar = generator.generate_bar("$TSLA", start, end, "5m")
         
         assert bar.topic == "$TSLA"
         assert bar.post_count == 2
@@ -158,33 +162,37 @@ class TestBarAggregator:
         assert len(bar.sample_post_ids) == 2
         mock_grok.summarize_bar.assert_called_once()
 
-    def test_create_bar_empty(self):
-        """Test creating a bar with no ticks."""
+    def test_generate_bar_empty(self):
+        """Test generating a bar with no ticks."""
         mock_grok = Mock()
-        aggregator = BarAggregator(grok_adapter=mock_grok)
+        tick_store = TickStore()
+        generator = BarGenerator(grok_adapter=mock_grok, tick_store=tick_store)
         
         now = datetime.now(timezone.utc)
         start = now - timedelta(minutes=5)
         end = now
         
-        bar = aggregator.create_bar("$TSLA", [], start, end)
+        bar = generator.generate_bar("$TSLA", start, end, "5m")
         
         assert bar.post_count == 0
         assert bar.summary is None
         mock_grok.summarize_bar.assert_not_called()
 
-    def test_create_bar_without_summary(self):
-        """Test creating a bar without generating summary."""
+    def test_generate_bar_without_summary(self):
+        """Test generating a bar without generating summary."""
         mock_grok = Mock()
-        aggregator = BarAggregator(grok_adapter=mock_grok)
+        tick_store = TickStore()
+        generator = BarGenerator(grok_adapter=mock_grok, tick_store=tick_store)
         
         now = datetime.now(timezone.utc)
-        ticks = [create_tick("tick1", topic="$TSLA")]
+        start = now - timedelta(minutes=5)
+        end = now
         
-        bar = aggregator.create_bar(
-            "$TSLA", ticks,
-            start=now - timedelta(minutes=5),
-            end=now,
+        # Add a tick to the store
+        tick_store.add_ticks("$TSLA", [create_tick("tick1", topic="$TSLA", timestamp=start + timedelta(minutes=1))])
+        
+        bar = generator.generate_bar(
+            "$TSLA", start, end, "5m",
             generate_summary=False
         )
         
@@ -192,141 +200,97 @@ class TestBarAggregator:
         assert bar.summary is None
         mock_grok.summarize_bar.assert_not_called()
 
-    def test_get_bars(self):
-        """Test retrieving bars for a topic."""
+    def test_generate_bars(self):
+        """Test generating multiple bars for a topic."""
         mock_grok = Mock()
         mock_grok.summarize_bar.return_value = BarSummary(
-            summary="Test", key_themes=[], sentiment="neutral",
+            summary="Test", key_themes=[], sentiment=0.5,
             post_count=1, engagement_level="low"
         )
         
-        aggregator = BarAggregator(grok_adapter=mock_grok)
+        tick_store = TickStore()
+        generator = BarGenerator(grok_adapter=mock_grok, tick_store=tick_store)
         
         now = datetime.now(timezone.utc)
         
-        # Create bars at different times
+        # Add ticks at different times across multiple bars
         for i in range(3):
-            start = now - timedelta(minutes=(i+1)*5)
-            end = start + timedelta(minutes=5)
-            ticks = [create_tick(f"tick{i}", topic="$TSLA", timestamp=start)]
-            aggregator.create_bar("$TSLA", ticks, start, end)
+            ts = now - timedelta(minutes=(i+1)*5 - 2)  # Place in the middle of each bar
+            tick_store.add_ticks("$TSLA", [create_tick(f"tick{i}", topic="$TSLA", timestamp=ts)])
         
-        bars = aggregator.get_bars("$TSLA", limit=10)
+        bars = generator.generate_bars("$TSLA", resolution="5m", limit=10, generate_summaries=False)
         
-        assert len(bars) == 3
-        # Should be sorted by start time descending
-        assert bars[0].start >= bars[1].start >= bars[2].start
+        # Should have bars (number depends on time window)
+        assert len(bars) > 0
+        # Should be sorted by start time descending (most recent first)
+        for i in range(len(bars) - 1):
+            assert bars[i].start >= bars[i+1].start
 
-    def test_get_bars_with_limit(self):
-        """Test limiting the number of bars returned."""
+    def test_generate_bars_with_limit(self):
+        """Test limiting the number of bars generated."""
         mock_grok = Mock()
-        mock_grok.summarize_bar.return_value = BarSummary(
-            summary="Test", key_themes=[], sentiment="neutral",
-            post_count=1, engagement_level="low"
-        )
+        tick_store = TickStore()
+        generator = BarGenerator(grok_adapter=mock_grok, tick_store=tick_store)
         
-        aggregator = BarAggregator(grok_adapter=mock_grok)
-        
-        now = datetime.now(timezone.utc)
-        
-        # Create 5 bars
-        for i in range(5):
-            start = now - timedelta(minutes=(i+1)*5)
-            end = start + timedelta(minutes=5)
-            ticks = [create_tick(f"tick{i}", topic="$TSLA", timestamp=start)]
-            aggregator.create_bar("$TSLA", ticks, start, end)
-        
-        bars = aggregator.get_bars("$TSLA", limit=3)
+        bars = generator.generate_bars("$TSLA", resolution="5m", limit=3, generate_summaries=False)
         
         assert len(bars) == 3
 
-    def test_get_latest_bar(self):
-        """Test getting the most recent bar."""
+    def test_generate_bars_empty_topic(self):
+        """Test generating bars for topic with no ticks."""
         mock_grok = Mock()
-        mock_grok.summarize_bar.return_value = BarSummary(
-            summary="Test", key_themes=[], sentiment="neutral",
-            post_count=1, engagement_level="low"
-        )
+        tick_store = TickStore()
+        generator = BarGenerator(grok_adapter=mock_grok, tick_store=tick_store)
         
-        aggregator = BarAggregator(grok_adapter=mock_grok)
+        bars = generator.generate_bars("$TSLA", resolution="5m", limit=3, generate_summaries=False)
+        
+        # Should still return bars (empty bars)
+        assert len(bars) == 3
+        for bar in bars:
+            assert bar.post_count == 0
+
+    def test_tick_store_clear_topic(self):
+        """Test clearing all ticks for a topic."""
+        tick_store = TickStore()
         
         now = datetime.now(timezone.utc)
+        ticks = [create_tick("tick1", topic="$TSLA", timestamp=now)]
+        tick_store.add_ticks("$TSLA", ticks)
         
-        # Create bars at different times
-        for i in range(3):
-            start = now - timedelta(minutes=(i+1)*5)
-            end = start + timedelta(minutes=5)
-            ticks = [create_tick(f"tick{i}", topic="$TSLA", timestamp=start)]
-            aggregator.create_bar("$TSLA", ticks, start, end)
+        assert tick_store.get_tick_count("$TSLA") == 1
         
-        latest = aggregator.get_latest_bar("$TSLA")
+        tick_store.clear_topic("$TSLA")
         
-        assert latest is not None
-        assert latest.sample_post_ids == ["tick0"]
-
-    def test_get_latest_bar_no_bars(self):
-        """Test getting latest bar when none exist."""
-        mock_grok = Mock()
-        aggregator = BarAggregator(grok_adapter=mock_grok)
-        
-        latest = aggregator.get_latest_bar("$TSLA")
-        
-        assert latest is None
-
-    def test_clear_topic(self):
-        """Test clearing all bars for a topic."""
-        mock_grok = Mock()
-        mock_grok.summarize_bar.return_value = BarSummary(
-            summary="Test", key_themes=[], sentiment="neutral",
-            post_count=1, engagement_level="low"
-        )
-        
-        aggregator = BarAggregator(grok_adapter=mock_grok)
-        
-        now = datetime.now(timezone.utc)
-        ticks = [create_tick("tick1", topic="$TSLA")]
-        aggregator.create_bar("$TSLA", ticks, now - timedelta(minutes=5), now)
-        
-        assert len(aggregator.get_bars("$TSLA")) == 1
-        
-        aggregator.clear_topic("$TSLA")
-        
-        assert len(aggregator.get_bars("$TSLA")) == 0
+        assert tick_store.get_tick_count("$TSLA") == 0
 
     def test_multiple_topics(self):
-        """Test bars for multiple topics."""
-        mock_grok = Mock()
-        mock_grok.summarize_bar.return_value = BarSummary(
-            summary="Test", key_themes=[], sentiment="neutral",
-            post_count=1, engagement_level="low"
-        )
-        
-        aggregator = BarAggregator(grok_adapter=mock_grok)
+        """Test ticks for multiple topics."""
+        tick_store = TickStore()
         
         now = datetime.now(timezone.utc)
         
-        # Create bars for different topics
-        for topic in ["$TSLA", "$AAPL"]:
-            ticks = [create_tick("tick", topic=topic)]
-            aggregator.create_bar(topic, ticks, now - timedelta(minutes=5), now)
+        # Add ticks for different topics
+        tick_store.add_ticks("$TSLA", [create_tick("tick1", topic="$TSLA", timestamp=now)])
+        tick_store.add_ticks("$AAPL", [create_tick("tick2", topic="$AAPL", timestamp=now)])
         
-        assert len(aggregator.get_bars("$TSLA")) == 1
-        assert len(aggregator.get_bars("$AAPL")) == 1
+        assert tick_store.get_tick_count("$TSLA") == 1
+        assert tick_store.get_tick_count("$AAPL") == 1
 
     def test_sample_posts_limited_to_5(self):
         """Test that sample posts are limited to 5."""
         mock_grok = Mock()
-        mock_grok.summarize_bar.return_value = BarSummary(
-            summary="Test", key_themes=[], sentiment="neutral",
-            post_count=10, engagement_level="high"
-        )
-        
-        aggregator = BarAggregator(grok_adapter=mock_grok)
+        tick_store = TickStore()
+        generator = BarGenerator(grok_adapter=mock_grok, tick_store=tick_store)
         
         now = datetime.now(timezone.utc)
-        ticks = [create_tick(f"tick{i}", topic="$TSLA") for i in range(10)]
+        start = now - timedelta(minutes=5)
+        end = now
         
-        bar = aggregator.create_bar("$TSLA", ticks, now - timedelta(minutes=5), now)
+        # Add 10 ticks
+        ticks = [create_tick(f"tick{i}", topic="$TSLA", timestamp=start + timedelta(minutes=i*0.4)) for i in range(10)]
+        tick_store.add_ticks("$TSLA", ticks)
+        
+        bar = generator.generate_bar("$TSLA", start, end, "5m", generate_summary=False)
         
         assert len(bar.sample_post_ids) == 5
 
@@ -356,11 +320,6 @@ class TestDigestService:
     def test_create_digest_with_bars(self):
         """Test creating digest with existing bars."""
         mock_grok = Mock()
-        mock_summary = BarSummary(
-            summary="Bar summary", key_themes=["tech"],
-            sentiment="positive", post_count=5, engagement_level="high"
-        )
-        mock_grok.summarize_bar.return_value = mock_summary
         
         mock_digest = TopicDigest(
             topic="$TSLA",
@@ -374,16 +333,24 @@ class TestDigestService:
         )
         mock_grok.create_topic_digest.return_value = mock_digest
         
-        aggregator = BarAggregator(grok_adapter=mock_grok)
-        
-        # Create some bars
+        # Create some bars manually
         now = datetime.now(timezone.utc)
         bars = []
         for i in range(3):
             start = now - timedelta(minutes=(i+1)*5)
             end = start + timedelta(minutes=5)
-            ticks = [create_tick(f"tick{i}", topic="$TSLA", timestamp=start)]
-            bar = aggregator.create_bar("$TSLA", ticks, start, end)
+            bar = Bar(
+                topic="$TSLA",
+                resolution="5m",
+                start=start,
+                end=end,
+                post_count=5,
+                total_likes=100,
+                summary=BarSummary(
+                    summary="Bar summary", key_themes=["tech"],
+                    sentiment=0.8, post_count=5, engagement_level="high"
+                )
+            )
             bars.append(bar)
         
         service = DigestService(grok_adapter=mock_grok)
@@ -397,18 +364,17 @@ class TestDigestService:
     def test_create_digest_grok_failure(self):
         """Test handling GrokAdapter failure."""
         mock_grok = Mock()
-        mock_summary = BarSummary(
-            summary="Test", key_themes=[], sentiment="neutral",
-            post_count=1, engagement_level="low"
-        )
-        mock_grok.summarize_bar.return_value = mock_summary
         mock_grok.create_topic_digest.side_effect = RuntimeError("API Error")
         
-        aggregator = BarAggregator(grok_adapter=mock_grok)
-        
+        # Create a bar manually
         now = datetime.now(timezone.utc)
-        ticks = [create_tick("tick1", topic="$TSLA")]
-        bar = aggregator.create_bar("$TSLA", ticks, now - timedelta(minutes=5), now)
+        bar = Bar(
+            topic="$TSLA",
+            resolution="5m",
+            start=now - timedelta(minutes=5),
+            end=now,
+            post_count=1
+        )
         
         service = DigestService(grok_adapter=mock_grok)
         
@@ -423,28 +389,34 @@ class TestResolutionHelpers:
 
     def test_resolution_map_values(self):
         """Test resolution map values."""
+        assert RESOLUTION_MAP["15s"] == 15
+        assert RESOLUTION_MAP["30s"] == 30
         assert RESOLUTION_MAP["1m"] == 60
         assert RESOLUTION_MAP["5m"] == 300
-        assert RESOLUTION_MAP["10m"] == 600
         assert RESOLUTION_MAP["15m"] == 900
         assert RESOLUTION_MAP["30m"] == 1800
         assert RESOLUTION_MAP["1h"] == 3600
 
-    def test_get_bar_window(self):
-        """Test getting current bar window."""
-        start, end = get_bar_window("5m")
+    def test_get_bar_boundaries(self):
+        """Test getting bar boundaries for a reference time."""
+        reference = datetime(2024, 1, 15, 12, 7, 30, tzinfo=timezone.utc)
+        start, end = get_bar_boundaries("5m", reference)
+        
+        # Should floor to 12:05 - 12:10 for 5m resolution
+        assert start == datetime(2024, 1, 15, 12, 5, 0, tzinfo=timezone.utc)
+        assert end == datetime(2024, 1, 15, 12, 10, 0, tzinfo=timezone.utc)
         
         diff = end - start
         assert diff.total_seconds() == 300
-        assert start.tzinfo == timezone.utc
 
-    def test_get_previous_bar_window(self):
-        """Test getting previous bar window."""
-        prev_start, prev_end = get_previous_bar_window("5m")
-        curr_start, curr_end = get_bar_window("5m")
+    def test_get_polling_window(self):
+        """Test getting a safe polling window for X API."""
+        start, end = get_polling_window(min_age_seconds=15)
         
-        # Previous end should equal current start
-        assert prev_end == curr_start
+        # Window should be MIN_RESOLUTION_SECONDS long
+        diff = end - start
+        assert diff.total_seconds() == 15  # MIN_RESOLUTION_SECONDS
         
-        diff = prev_end - prev_start
-        assert diff.total_seconds() == 300
+        # End should be at least 15 seconds ago
+        now = datetime.now(timezone.utc)
+        assert (now - end).total_seconds() >= 15

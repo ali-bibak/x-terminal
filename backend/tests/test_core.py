@@ -34,7 +34,7 @@ class TestTopicModel:
         assert topic.id == "tsla"
         assert topic.label == "$TSLA"
         assert topic.status == TopicStatus.ACTIVE
-        assert topic.resolution == "5m"
+        assert topic.resolution == "1m"  # DEFAULT_RESOLUTION
         assert topic.poll_count == 0
 
     def test_topic_with_custom_resolution(self):
@@ -74,7 +74,7 @@ class TestTopicManagerEdgeCases:
         grok_adapter.summarize_bar = Mock(return_value=BarSummary(
             summary="Test",
             key_themes=[],
-            sentiment="neutral",
+            sentiment=0.5,  # Neutral
             post_count=0,
             engagement_level="low"
         ))
@@ -82,21 +82,26 @@ class TestTopicManagerEdgeCases:
         return TopicManager(x_adapter, grok_adapter)
 
     def test_get_bars_empty_topic(self, manager):
-        """Test getting bars for topic with no bars."""
+        """Test getting bars for topic with no ticks (on-demand generation)."""
         manager.add_topic("empty", "Empty", "empty")
-        bars = manager.get_bars("empty")
-        assert bars == []
+        # Bars are generated on-demand, so they exist but have 0 posts
+        bars = manager.get_bars("empty", limit=5, generate_summaries=False)
+        assert len(bars) == 5
+        for bar in bars:
+            assert bar.post_count == 0
 
     def test_get_bars_nonexistent_topic(self, manager):
         """Test getting bars for non-existent topic."""
         bars = manager.get_bars("nonexistent")
         assert bars == []
 
-    def test_get_latest_bar_no_bars(self, manager):
-        """Test getting latest bar when none exist."""
+    def test_get_latest_bar_no_ticks(self, manager):
+        """Test getting latest bar when no ticks exist (on-demand generation)."""
         manager.add_topic("empty", "Empty", "empty")
-        bar = manager.get_latest_bar("empty")
-        assert bar is None
+        # Bars are generated on-demand
+        bar = manager.get_latest_bar("empty", generate_summary=False)
+        assert bar is not None
+        assert bar.post_count == 0
 
     def test_pause_nonexistent_topic(self, manager):
         """Test pausing non-existent topic."""
@@ -123,7 +128,7 @@ class TestTopicManagerEdgeCases:
 
     def test_resolution_validation(self, manager):
         """Test that valid resolutions are accepted."""
-        valid_resolutions = ["1m", "5m", "10m", "15m", "30m", "1h"]
+        valid_resolutions = ["15s", "30s", "1m", "5m", "15m", "30m", "1h"]
         
         for i, res in enumerate(valid_resolutions):
             manager.add_topic(f"topic_{i}", f"Topic {i}", f"query{i}", resolution=res)
@@ -155,7 +160,6 @@ class TestTickPollerUnit:
         poller = TickPoller(mock_manager, poll_interval=60)
         
         assert poller.poll_interval == 60
-        assert poller.generate_summaries is True
         assert poller._running is False
 
     @pytest.mark.asyncio
@@ -178,7 +182,7 @@ class TestTickPollerUnit:
         
         # Should only call poll_topic for active topics
         assert mock_manager.poll_topic.call_count == 1
-        mock_manager.poll_topic.assert_called_with("topic1", generate_summary=True)
+        mock_manager.poll_topic.assert_called_with("topic1")
 
     @pytest.mark.asyncio
     async def test_poll_now_specific_topic(self, mock_manager):
@@ -186,7 +190,7 @@ class TestTickPollerUnit:
         poller = TickPoller(mock_manager, poll_interval=60)
         await poller.poll_now("topic1")
         
-        mock_manager.poll_topic.assert_called_once_with("topic1", generate_summary=True)
+        mock_manager.poll_topic.assert_called_once_with("topic1")
 
     @pytest.mark.asyncio
     async def test_poll_now_all_topics(self, mock_manager):
@@ -216,13 +220,13 @@ class TestCoreIntegration:
         grok_adapter.summarize_bar = Mock(return_value=BarSummary(
             summary="Integration test summary",
             key_themes=["test"],
-            sentiment="positive",
+            sentiment=0.8,  # Positive
             post_count=3,
             engagement_level="medium"
         ))
         
         manager = TopicManager(x_adapter, grok_adapter)
-        poller = TickPoller(manager, poll_interval=60, generate_summaries=True)
+        poller = TickPoller(manager, poll_interval=60)
         
         return manager, poller, x_adapter, grok_adapter
 
@@ -251,8 +255,8 @@ class TestCoreIntegration:
         assert manager.get_topic("test") is None
 
     @pytest.mark.asyncio
-    async def test_poll_creates_bars(self, full_setup):
-        """Test that polling creates bars."""
+    async def test_poll_stores_ticks(self, full_setup):
+        """Test that polling stores ticks for bar generation."""
         manager, poller, x_adapter, grok_adapter = full_setup
         
         # Setup mock ticks
@@ -272,15 +276,15 @@ class TestCoreIntegration:
         
         # Add topic and poll
         manager.add_topic("test", "Test", "test")
-        await manager.poll_topic("test", generate_summary=True)
+        new_ticks = await manager.poll_topic("test")
         
-        # Verify bar was created
-        bars = manager.get_bars("test")
-        assert len(bars) == 1
-        assert bars[0].post_count == 5
+        # Verify ticks were stored
+        assert new_ticks == 5
+        assert manager.tick_store.get_tick_count("Test") == 5
         
-        # Verify Grok was called
-        grok_adapter.summarize_bar.assert_called_once()
+        # Bars are generated on-demand
+        bars = manager.get_bars("test", limit=3, generate_summaries=False)
+        assert len(bars) == 3
 
     @pytest.mark.asyncio
     async def test_error_handling_in_poll(self, full_setup):
@@ -291,10 +295,10 @@ class TestCoreIntegration:
         x_adapter.search_for_bar = Mock(side_effect=XRateLimitError("Rate limited"))
         
         manager.add_topic("test", "Test", "test")
-        bar = await manager.poll_topic("test")
+        new_ticks = await manager.poll_topic("test")
         
-        # Should return None and set error status
-        assert bar is None
+        # Should return 0 and set error status
+        assert new_ticks == 0
         topic = manager.get_topic("test")
         assert topic.status == TopicStatus.ERROR
         assert "Rate limited" in topic.last_error

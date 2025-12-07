@@ -87,7 +87,7 @@ def mock_bar_summary(topic: str, ticks: List[Tick], start_time: datetime, end_ti
         return BarSummary(
             summary="No posts in this time window",
             key_themes=[],
-            sentiment="neutral",
+            sentiment=0.5,  # Neutral
             post_count=0,
             engagement_level="low"
         )
@@ -103,10 +103,13 @@ def mock_bar_summary(topic: str, ticks: List[Tick], start_time: datetime, end_ti
         base_themes.extend(["market", "investment", "analysis"])
 
     themes = rng.sample(base_themes, k=min(3, len(base_themes)))
-    sentiment = rng.choice(["positive", "negative", "neutral", "mixed"])
+    # Generate random sentiment as float (0.0-1.0)
+    sentiment = round(rng.random(), 2)
     engagement = rng.choice(["low", "medium", "high"])
-
-    summary = f"{post_count} posts about {topic} with {sentiment} sentiment and {engagement} engagement."
+    
+    # Create sentiment label for summary text
+    sentiment_label = "positive" if sentiment > 0.6 else ("negative" if sentiment < 0.4 else "neutral")
+    summary = f"{post_count} posts about {topic} with {sentiment_label} sentiment ({sentiment:.2f}) and {engagement} engagement."
 
     return BarSummary(
         summary=summary,

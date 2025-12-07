@@ -143,7 +143,7 @@ class TestGrokAdapter:
         assert isinstance(summary, BarSummary)
         assert summary.post_count == 2
         assert summary.summary is not None
-        assert summary.sentiment in ["positive", "negative", "neutral", "mixed"]
+        assert 0.0 <= summary.sentiment <= 1.0
         assert summary.engagement_level in ["low", "medium", "high"]
         assert summary.highlight_posts is not None
         assert len(summary.highlight_posts) <= 2
@@ -196,7 +196,7 @@ class TestGrokAdapter:
         expected_summary = BarSummary(
             summary="Test summary",
             key_themes=["theme1", "theme2"],
-            sentiment="positive",
+            sentiment=0.8,  # Positive
             post_count=5,
             engagement_level="high"
         )

@@ -13,7 +13,7 @@ from main import app
 from adapter.models import Tick
 from adapter.grok import BarSummary, TopicDigest
 from core import TopicManager, TickPoller, Topic, TopicStatus
-from aggregator import Bar, BarAggregator
+from aggregator import Bar, BarGenerator, TickStore
 
 
 # ============================================================================
@@ -43,7 +43,7 @@ def mock_grok_adapter():
     adapter.summarize_bar = Mock(return_value=BarSummary(
         summary="Test summary for the bar",
         key_themes=["theme1", "theme2"],
-        sentiment="positive",
+        sentiment=0.8,  # Positive
         post_count=5,
         engagement_level="high",
         highlight_posts=["post1", "post2"]
@@ -96,7 +96,7 @@ def topic_manager(mock_x_adapter, mock_grok_adapter):
 
 @pytest.fixture
 def topic_manager_with_data(topic_manager, sample_ticks, mock_x_adapter):
-    """TopicManager with a topic and some bars."""
+    """TopicManager with a topic and some ticks."""
     # Add a topic
     topic_manager.add_topic(
         topic_id="tsla",
@@ -108,23 +108,12 @@ def topic_manager_with_data(topic_manager, sample_ticks, mock_x_adapter):
     # Mock X adapter to return sample ticks
     mock_x_adapter.search_for_bar.return_value = sample_ticks[:5]
     
-    # Create some bars manually
-    aggregator = topic_manager._aggregators["tsla"]
-    now = datetime.now(timezone.utc)
+    # Add ticks directly to the tick store
+    topic_manager.tick_store.add_ticks("$TSLA", sample_ticks)
     
-    for i in range(3):
-        start = now - timedelta(minutes=(i + 1) * 5)
-        end = start + timedelta(minutes=5)
-        ticks = sample_ticks[i*2:(i+1)*2] if i < len(sample_ticks) // 2 else []
-        
-        aggregator.create_bar(
-            topic="$TSLA",
-            ticks=ticks,
-            start=start,
-            end=end,
-            resolution="5m",
-            generate_summary=False  # Skip Grok call in fixture
-        )
+    # Update tick count on topic
+    topic = topic_manager.get_topic("tsla")
+    topic.tick_count = len(sample_ticks)
     
     return topic_manager
 
@@ -197,18 +186,20 @@ class TestTopicManager:
 
     def test_get_bars(self, topic_manager_with_data):
         """Test getting bars for a topic."""
-        bars = topic_manager_with_data.get_bars("tsla", limit=10)
+        bars = topic_manager_with_data.get_bars("tsla", limit=10, generate_summaries=False)
         
-        assert len(bars) == 3
-        # Should be sorted by time descending
-        assert bars[0].start >= bars[1].start >= bars[2].start
+        # Bars are generated on-demand up to the limit
+        assert len(bars) == 10
+        # Should be sorted by time descending (most recent first)
+        for i in range(len(bars) - 1):
+            assert bars[i].start >= bars[i+1].start
 
     def test_get_latest_bar(self, topic_manager_with_data):
         """Test getting the latest bar."""
-        latest = topic_manager_with_data.get_latest_bar("tsla")
+        latest = topic_manager_with_data.get_latest_bar("tsla", generate_summary=False)
         
         assert latest is not None
-        bars = topic_manager_with_data.get_bars("tsla")
+        bars = topic_manager_with_data.get_bars("tsla", generate_summaries=False)
         assert latest.start == bars[0].start
 
 
@@ -217,32 +208,33 @@ class TestTopicManagerPolling:
 
     @pytest.mark.asyncio
     async def test_poll_topic_success(self, topic_manager, sample_ticks, mock_x_adapter):
-        """Test successful polling creates a bar."""
+        """Test successful polling stores ticks."""
         topic_manager.add_topic("tsla", "$TSLA", "$TSLA")
         mock_x_adapter.search_for_bar.return_value = sample_ticks[:5]
         
-        bar = await topic_manager.poll_topic("tsla", generate_summary=False)
+        new_ticks = await topic_manager.poll_topic("tsla")
         
-        assert bar is not None
-        assert bar.post_count == 5
+        assert new_ticks == 5
         mock_x_adapter.search_for_bar.assert_called_once()
+        
+        # Verify ticks are stored
+        assert topic_manager.tick_store.get_tick_count("$TSLA") == 5
 
     @pytest.mark.asyncio
     async def test_poll_topic_empty_results(self, topic_manager, mock_x_adapter):
-        """Test polling with no results creates empty bar."""
+        """Test polling with no results stores no ticks."""
         topic_manager.add_topic("tsla", "$TSLA", "$TSLA")
         mock_x_adapter.search_for_bar.return_value = []
         
-        bar = await topic_manager.poll_topic("tsla")
+        new_ticks = await topic_manager.poll_topic("tsla")
         
-        assert bar is not None
-        assert bar.post_count == 0
+        assert new_ticks == 0
 
     @pytest.mark.asyncio
     async def test_poll_nonexistent_topic(self, topic_manager):
-        """Test polling non-existent topic returns None."""
-        bar = await topic_manager.poll_topic("nonexistent")
-        assert bar is None
+        """Test polling non-existent topic returns 0."""
+        new_ticks = await topic_manager.poll_topic("nonexistent")
+        assert new_ticks == 0
 
     @pytest.mark.asyncio
     async def test_poll_paused_topic_skipped(self, topic_manager, mock_x_adapter):
@@ -250,23 +242,25 @@ class TestTopicManagerPolling:
         topic_manager.add_topic("tsla", "$TSLA", "$TSLA")
         topic_manager.pause_topic("tsla")
         
-        bar = await topic_manager.poll_topic("tsla")
+        new_ticks = await topic_manager.poll_topic("tsla")
         
-        assert bar is None
+        assert new_ticks == 0
         mock_x_adapter.search_for_bar.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_poll_topic_with_summary(self, topic_manager, sample_ticks, mock_x_adapter, mock_grok_adapter):
-        """Test polling with Grok summary generation."""
+    async def test_poll_topic_stores_ticks_for_bar_generation(self, topic_manager, sample_ticks, mock_x_adapter, mock_grok_adapter):
+        """Test polling stores ticks that can be used for bar generation."""
         topic_manager.add_topic("tsla", "$TSLA", "$TSLA")
         mock_x_adapter.search_for_bar.return_value = sample_ticks[:5]
         
-        bar = await topic_manager.poll_topic("tsla", generate_summary=True)
+        new_ticks = await topic_manager.poll_topic("tsla")
         
-        assert bar is not None
-        assert bar.summary is not None
-        assert bar.summary.summary == "Test summary for the bar"
-        mock_grok_adapter.summarize_bar.assert_called_once()
+        assert new_ticks == 5
+        
+        # Bars are generated on-demand, not during polling
+        # Generate bars with summaries
+        bars = topic_manager.get_bars("tsla", limit=1, generate_summaries=True)
+        assert len(bars) >= 1
 
     @pytest.mark.asyncio
     async def test_poll_topic_x_error_sets_error_status(self, topic_manager, mock_x_adapter):
@@ -276,9 +270,9 @@ class TestTopicManagerPolling:
         topic_manager.add_topic("tsla", "$TSLA", "$TSLA")
         mock_x_adapter.search_for_bar.side_effect = XAPIError("API Error")
         
-        bar = await topic_manager.poll_topic("tsla")
+        new_ticks = await topic_manager.poll_topic("tsla")
         
-        assert bar is None
+        assert new_ticks == 0
         topic = topic_manager.get_topic("tsla")
         assert topic.status == TopicStatus.ERROR
         assert topic.last_error is not None
@@ -293,28 +287,33 @@ class TestTickPoller:
 
     @pytest.mark.asyncio
     async def test_poll_now_single_topic(self, topic_manager, sample_ticks, mock_x_adapter):
-        """Test manual poll for single topic."""
+        """Test manual poll for single topic stores ticks."""
         topic_manager.add_topic("tsla", "$TSLA", "$TSLA")
         mock_x_adapter.search_for_bar.return_value = sample_ticks[:3]
         
-        poller = TickPoller(topic_manager, poll_interval=60, generate_summaries=False)
+        poller = TickPoller(topic_manager, poll_interval=60)
         await poller.poll_now("tsla")
         
-        bars = topic_manager.get_bars("tsla")
-        assert len(bars) == 1
+        # Verify ticks were stored
+        assert topic_manager.tick_store.get_tick_count("$TSLA") == 3
+        
+        # Bars are generated on-demand
+        bars = topic_manager.get_bars("tsla", limit=5, generate_summaries=False)
+        assert len(bars) == 5  # On-demand generation returns requested limit
 
     @pytest.mark.asyncio
     async def test_poll_now_all_topics(self, topic_manager, sample_ticks, mock_x_adapter):
-        """Test manual poll for all topics."""
+        """Test manual poll for all topics stores ticks."""
         topic_manager.add_topic("tsla", "$TSLA", "$TSLA")
         topic_manager.add_topic("aapl", "$AAPL", "$AAPL")
         mock_x_adapter.search_for_bar.return_value = sample_ticks[:2]
         
-        poller = TickPoller(topic_manager, poll_interval=60, generate_summaries=False)
+        poller = TickPoller(topic_manager, poll_interval=60)
         await poller.poll_now()
         
-        assert len(topic_manager.get_bars("tsla")) == 1
-        assert len(topic_manager.get_bars("aapl")) == 1
+        # Verify ticks were stored for both topics
+        assert topic_manager.tick_store.get_tick_count("$TSLA") == 2
+        assert topic_manager.tick_store.get_tick_count("$AAPL") == 2
 
 
 # ============================================================================
@@ -496,7 +495,7 @@ class TestFullFlow:
         # DigestService now gets bars passed directly from API route
         digest_service = DigestService(grok_adapter=mock_grok_adapter)
         
-        poller = TickPoller(manager, poll_interval=300, generate_summaries=True)
+        poller = TickPoller(manager, poll_interval=300)
         set_dependencies(manager, poller, digest_service)
         
         # Setup mock to return sample ticks
@@ -515,22 +514,23 @@ class TestFullFlow:
         assert response.status_code == 201
         topic_id = response.json()["id"]
         
-        # 2. Poll for data
+        # 2. Poll for data (stores ticks)
         response = fresh_client.post(f"/api/v1/topics/{topic_id}/poll")
         assert response.status_code == 200
         poll_result = response.json()
         assert poll_result["success"] is True
+        assert poll_result["new_ticks"] >= 0
         
-        # 3. Get bars
-        response = fresh_client.get(f"/api/v1/topics/{topic_id}/bars")
+        # 3. Get bars (generated on-demand)
+        response = fresh_client.get(f"/api/v1/topics/{topic_id}/bars?limit=5")
         assert response.status_code == 200
         bars = response.json()
-        assert len(bars) >= 1
+        assert len(bars) == 5  # On-demand generation returns requested limit
         
         # 4. Verify bar has expected structure
         bar = bars[0]
         assert bar["topic"] == "$NVDA"
-        assert bar["post_count"] == 5
+        assert "post_count" in bar
         
         # 5. Delete topic
         response = fresh_client.delete(f"/api/v1/topics/{topic_id}")
@@ -556,18 +556,19 @@ class TestFullFlow:
         assert response.status_code == 200
         assert len(response.json()) >= 3
         
-        # Poll each topic
+        # Poll each topic (stores ticks)
         for topic_id in created_ids:
             response = fresh_client.post(f"/api/v1/topics/{topic_id}/poll")
             assert response.status_code == 200
         
-        # Verify all have bars
+        # Verify all can generate bars
         for topic_id in created_ids:
-            response = fresh_client.get(f"/api/v1/topics/{topic_id}/bars")
+            response = fresh_client.get(f"/api/v1/topics/{topic_id}/bars?limit=3")
             assert response.status_code == 200
+            assert len(response.json()) == 3
 
-    def test_bar_accumulation(self, fresh_client, sample_ticks, mock_x_adapter):
-        """Test that multiple polls accumulate bars."""
+    def test_tick_accumulation(self, fresh_client, sample_ticks, mock_x_adapter):
+        """Test that multiple polls accumulate ticks."""
         # Create topic
         response = fresh_client.post("/api/v1/topics", json={
             "label": "$TEST",
@@ -575,14 +576,17 @@ class TestFullFlow:
         })
         topic_id = response.json()["id"]
         
-        # Poll multiple times (simulating different time windows)
+        # Poll multiple times (accumulates ticks)
+        total_ticks = 0
         for i in range(3):
             # Change the ticks slightly each time
             mock_x_adapter.search_for_bar.return_value = sample_ticks[i:i+3]
-            fresh_client.post(f"/api/v1/topics/{topic_id}/poll")
+            response = fresh_client.post(f"/api/v1/topics/{topic_id}/poll")
+            total_ticks += response.json().get("new_ticks", 0)
         
-        # Should have accumulated 3 bars
-        response = fresh_client.get(f"/api/v1/topics/{topic_id}/bars")
+        # Bars are generated on-demand, not accumulated
+        # Request 5 bars
+        response = fresh_client.get(f"/api/v1/topics/{topic_id}/bars?limit=5")
         bars = response.json()
-        assert len(bars) == 3
+        assert len(bars) == 5  # On-demand generation returns requested limit
 

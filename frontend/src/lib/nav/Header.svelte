@@ -3,7 +3,7 @@
 >
   <img src="/x-logo.svg" alt="X Terminal Logo" class="w-6 h-6" />
   Terminal
-  <div class="hidden md:flex bg-blue-500/80 px-3 rounded-lg">Pro</div>
+  <div class="hidden md:flex bg-blue-500/80 px-2 rounded-lg">Pro</div>
 </nav>
 
 <style>

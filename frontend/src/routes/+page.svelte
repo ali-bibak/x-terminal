@@ -37,6 +37,24 @@
     },
   ]);
 
+  function checkCollision(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+  ): boolean {
+    return panels.some((panel) => {
+      // Check if rectangles overlap
+      const noOverlap =
+        x >= panel.x + panel.width ||
+        x + width <= panel.x ||
+        y >= panel.y + panel.height ||
+        y + height <= panel.y;
+
+      return !noOverlap;
+    });
+  }
+
   function findNextAvailablePosition() {
     // Try to find an empty spot in a grid pattern
     const defaultSize = 33.33; // 1/3 of screen
@@ -54,17 +72,13 @@
 
     // Find first position that doesn't overlap with existing panels
     for (const pos of positions) {
-      const overlaps = panels.some(
-        (panel) =>
-          Math.abs(panel.x - pos.x) < 10 && Math.abs(panel.y - pos.y) < 10,
-      );
-      if (!overlaps) {
+      if (!checkCollision(pos.x, pos.y, defaultSize, defaultSize)) {
         return { x: pos.x, y: pos.y, width: defaultSize, height: defaultSize };
       }
     }
 
-    // If all positions taken, stack on top left
-    return { x: 0, y: 0, width: defaultSize, height: defaultSize };
+    // If all positions taken, try smaller panels or stack on top left
+    return { x: 5, y: 5, width: defaultSize, height: defaultSize };
   }
 
   function addPanel() {

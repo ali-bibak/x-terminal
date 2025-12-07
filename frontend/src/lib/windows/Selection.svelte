@@ -1,5 +1,6 @@
 <script lang="ts">
   import TopicSelection from "$lib/items/TopicSelection.svelte";
+  import { Search } from "lucide-svelte";
 
   interface Props {
     onNavigate?: (topic: string) => void;
@@ -8,11 +9,17 @@
   let { onNavigate }: Props = $props();
 </script>
 
-<input
-  type="text"
-  placeholder="Search..."
-  class="w-full px-4 py-2 border border-stone-800 rounded-full focus:outline-none focus:border-blue-400"
-/>
+<div class="relative">
+  <Search
+    class="absolute left-4 top-1/2 -translate-y-1/2 text-stone-400"
+    size={20}
+  />
+  <input
+    type="text"
+    placeholder="Search..."
+    class="w-full pl-12 pr-4 py-2 border border-stone-800 rounded-full focus:outline-none focus:border-blue-400"
+  />
+</div>
 
 <h1 class="font-bold text-xl mt-4">Subscribed</h1>
 <div class="mt-2 -mx-4">
@@ -23,7 +30,7 @@
   />
 </div>
 
-<h1 class="font-bold text-xl mt-4">Local News</h1>
+<h1 class="font-bold text-xl mt-4">In Palo Alto, California</h1>
 <div class="mt-2 -mx-4">
   <TopicSelection
     title="Elon visits xAI"
@@ -33,6 +40,11 @@
   <TopicSelection
     title="xAI Hackathon"
     tweetCount={240828}
+    onclick={() => onNavigate?.("xAI Hackathon")}
+  />
+  <TopicSelection
+    title="San Jose Highway Accidents"
+    tweetCount={2402}
     onclick={() => onNavigate?.("xAI Hackathon")}
   />
 </div>
@@ -62,5 +74,15 @@
     title="The Boys Season 5 Trailer"
     tweetCount={231232}
     onclick={() => onNavigate?.("The Boys Season 5 Trailer")}
+  />
+</div>
+
+<h1 class="font-bold text-xl mt-4">Requested</h1>
+<div class="mt-2 -mx-4">
+  <TopicSelection
+    title="GTA VI Trailer 3"
+    requested={true}
+    tweetCount={0}
+    onclick={() => {}}
   />
 </div>

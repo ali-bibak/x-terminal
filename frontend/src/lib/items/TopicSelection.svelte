@@ -7,9 +7,10 @@
     title: string;
     tweetCount: number;
     onclick?: () => void;
+    requested?: boolean;
   }
 
-  let { title, tweetCount, onclick }: Props = $props();
+  let { title, tweetCount, onclick, requested }: Props = $props();
 
   function formatTweetCount(count: number): string {
     if (count >= 1_000_000) {
@@ -27,7 +28,13 @@
 >
   <h1 class="font-bold text-xl">{title}</h1>
   <div class="flex items-center gap-x-2">
-    <ProfilePictureCollection size={20} />
-    <p class="text-stone-400 font-sm">{formatTweetCount(tweetCount)} tweets</p>
+    {#if requested}
+      <p class="text-stone-400 font-sm">231 People Interested</p>
+    {:else}
+      <ProfilePictureCollection size={20} />
+      <p class="text-stone-400 font-sm">
+        {formatTweetCount(tweetCount)} tweets
+      </p>
+    {/if}
   </div>
 </button>

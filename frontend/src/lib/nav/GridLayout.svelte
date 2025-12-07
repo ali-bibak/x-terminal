@@ -42,6 +42,27 @@
     return Math.round(value / cellSize) * cellSize;
   }
 
+  function checkCollision(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    excludeId: string,
+  ): boolean {
+    return panels.some((panel) => {
+      if (panel.id === excludeId) return false;
+
+      // Check if rectangles overlap
+      const noOverlap =
+        x >= panel.x + panel.width ||
+        x + width <= panel.x ||
+        y >= panel.y + panel.height ||
+        y + height <= panel.y;
+
+      return !noOverlap;
+    });
+  }
+
   function handleMouseDown(
     e: MouseEvent,
     panelId: string,
@@ -90,14 +111,20 @@
         const deltaX = ((e.clientX - startX) / containerWidth) * 100;
         const deltaY = ((e.clientY - startY) / containerHeight) * 100;
 
-        panel.x = Math.max(
+        const newX = Math.max(
           0,
           Math.min(100 - panel.width, snapToGrid(startPanelX + deltaX)),
         );
-        panel.y = Math.max(
+        const newY = Math.max(
           0,
           Math.min(100 - panel.height, snapToGrid(startPanelY + deltaY)),
         );
+
+        // Only move if no collision
+        if (!checkCollision(newX, newY, panel.width, panel.height, panel.id)) {
+          panel.x = newX;
+          panel.y = newY;
+        }
       }
     } else if (resizingPanel && resizeDirection) {
       const panel = panels.find((p) => p.id === resizingPanel);
@@ -108,33 +135,47 @@
         const deltaX = ((e.clientX - startX) / containerWidth) * 100;
         const deltaY = ((e.clientY - startY) / containerHeight) * 100;
 
+        // Calculate new dimensions for all directions
+        let newX = panel.x;
+        let newY = panel.y;
+        let newWidth = panel.width;
+        let newHeight = panel.height;
+
         if (resizeDirection.includes("e")) {
-          panel.width = Math.max(
+          newWidth = Math.max(
             cellSize,
             Math.min(100 - panel.x, snapToGrid(startWidth + deltaX)),
           );
         }
         if (resizeDirection.includes("w")) {
-          const newX = snapToGrid(startPanelX + deltaX);
-          const newWidth = snapToGrid(startWidth - deltaX);
-          if (newWidth >= cellSize && newX >= 0) {
-            panel.x = newX;
-            panel.width = newWidth;
+          const tempX = snapToGrid(startPanelX + deltaX);
+          const tempWidth = snapToGrid(startWidth - deltaX);
+          if (tempWidth >= cellSize && tempX >= 0) {
+            newX = tempX;
+            newWidth = tempWidth;
           }
         }
         if (resizeDirection.includes("s")) {
-          panel.height = Math.max(
+          newHeight = Math.max(
             cellSize,
             Math.min(100 - panel.y, snapToGrid(startHeight + deltaY)),
           );
         }
         if (resizeDirection.includes("n")) {
-          const newY = snapToGrid(startPanelY + deltaY);
-          const newHeight = snapToGrid(startHeight - deltaY);
-          if (newHeight >= cellSize && newY >= 0) {
-            panel.y = newY;
-            panel.height = newHeight;
+          const tempY = snapToGrid(startPanelY + deltaY);
+          const tempHeight = snapToGrid(startHeight - deltaY);
+          if (tempHeight >= cellSize && tempY >= 0) {
+            newY = tempY;
+            newHeight = tempHeight;
           }
+        }
+
+        // Only apply if no collision with final dimensions
+        if (!checkCollision(newX, newY, newWidth, newHeight, panel.id)) {
+          panel.x = newX;
+          panel.y = newY;
+          panel.width = newWidth;
+          panel.height = newHeight;
         }
       }
     }
@@ -176,29 +217,30 @@
 
   {#each panels as panel (panel.id)}
     <div
-      class="absolute border border-stone-800 bg-black overflow-auto"
+      class="absolute border-[1.5px] border-stone-800 bg-black overflow-auto rounded-xl shadow-3xl
+      shadow-[0_0_10px_rgba(255,255,255,0.3)] flex flex-col"
       style="left: {panel.x}%; top: {panel.y}%; width: {panel.width}%; height: {panel.height}%;"
     >
       <!-- Drag handle -->
       <div
-        class="h-8 bg-stone-900 border-b border-stone-800 cursor-move flex items-center justify-between px-4"
+        class="h-10 sticky cursor-move flex items-center justify-between px-4 sticky top-0 z-10 backdrop-blur-md bg-black/50"
         onmousedown={(e) => handleMouseDown(e, panel.id)}
       >
-        <span class="text-sm font-medium text-stone-400">Panel</span>
+        <span class="text-lg font-medium text-stone-400">Terminal</span>
         <button
           onclick={(e) => {
             e.stopPropagation();
             removePanel(panel.id);
           }}
-          class="text-stone-400 hover:text-white hover:bg-stone-800 rounded p-1"
+          class="text-stone-400 hover:text-white hover:bg-stone-800 rounded-full p-1"
           title="Close Panel"
         >
-          <X size={16} />
+          <X size={25} />
         </button>
       </div>
 
       <!-- Panel content -->
-      <div class="p-4 h-[calc(100%-2rem)] overflow-auto">
+      <div class="p-4 flex-1 overflow-auto">
         <svelte:component this={panel.component} {...panel.props || {}} />
       </div>
 

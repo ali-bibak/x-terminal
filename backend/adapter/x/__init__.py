@@ -117,6 +117,14 @@ class XAdapter:
         self.rate_limiter = rate_limiter or RateLimiter()
         if "x_search" not in self.rate_limiter.configs:
             self.rate_limiter.configure_limit("x_search", self.DEFAULT_RATE_LIMIT)
+
+        # Configure rate limiter for trends endpoint (75 requests per 15 minutes)
+        if "x_trends" not in self.rate_limiter.configs:
+            self.rate_limiter.configure_limit("x_trends", RateLimitConfig(
+                requests_per_window=75,
+                window_seconds=900,  # 15 minutes
+                strategy="sliding_window"
+            ))
         
         # Track rate limit status from API responses
         self._rate_limit_status = {
@@ -485,10 +493,150 @@ class XAdapter:
             raise XAPIError(f"Unexpected error: {e}")
 
 
+    def get_trending_topics(
+        self,
+        woeid: int,
+        limit: int = 10
+    ) -> List[dict]:
+        """
+        Fetch trending topics for a specific location by WOEID.
+
+        Uses X API v2: GET /2/trends/by/woeid/{woeid}
+
+        Args:
+            woeid: Where On Earth ID for location (1 = Worldwide)
+            limit: Maximum number of trends to return (default: 10)
+
+        Returns:
+            List of trending topic dictionaries with:
+            - name: Topic name/hashtag
+            - url: X URL for the topic
+            - query: Search query string
+            - tweet_volume: Number of tweets (may be None)
+            - rank: Ranking position (1-based)
+
+        Raises:
+            XAuthenticationError: If not configured with bearer token
+            XRateLimitError: If rate limit exceeded
+            XAPIError: If API returns an error
+        """
+        if not self._is_configured:
+            raise XAuthenticationError("X adapter not configured - set X_BEARER_TOKEN")
+
+        # Wait for rate limit (if enabled)
+        if not self._skip_rate_limit:
+            self.rate_limiter.wait_if_needed("x_trends")
+
+        url = f"{self.BASE_URL}/trends/by/woeid/{woeid}"
+
+        try:
+            start_time_ms = time.time() * 1000
+            response = requests.get(
+                url,
+                headers=self.headers,
+                timeout=15
+            )
+            latency_ms = (time.time() * 1000) - start_time_ms
+
+            # Always update rate limit status from headers (even on errors)
+            self._update_rate_limit_status(response)
+
+            # Record X API call in monitoring
+            mon = _get_monitor()
+            if mon:
+                is_error = response.status_code >= 400
+                mon.metrics.record_x_api_call(latency_ms, error=is_error)
+                if is_error:
+                    from monitoring import EventType
+                    mon.activity.add_event(
+                        EventType.ERROR,
+                        topic="trends",
+                        error=f"X API {response.status_code}"
+                    )
+
+            # Handle specific error codes
+            if response.status_code == 401:
+                raise XAuthenticationError("Invalid or expired bearer token")
+            elif response.status_code == 429:
+                # Extract rate limit info from headers
+                reset_time = response.headers.get("x-rate-limit-reset")
+                remaining = response.headers.get("x-rate-limit-remaining")
+                limit_val = response.headers.get("x-rate-limit-limit")
+                raise XRateLimitError(
+                    "X API rate limit exceeded",
+                    reset_time=int(reset_time) if reset_time else None,
+                    remaining=int(remaining) if remaining else None,
+                    limit=int(limit_val) if limit_val else None
+                )
+            elif response.status_code == 404:
+                raise XAPIError(
+                    f"Invalid WOEID: {woeid}",
+                    status_code=404,
+                    response_text=response.text
+                )
+            elif response.status_code >= 400:
+                raise XAPIError(
+                    f"X API error: {response.status_code}",
+                    status_code=response.status_code,
+                    response_text=response.text
+                )
+
+            response.raise_for_status()
+            data = response.json()
+
+            # X API v2 trends response format:
+            # { "data": [{ "trend_name": "...", "tweet_count": ... }, ...] }
+            if "data" not in data or not data["data"]:
+                logger.info(f"No trending topics found for WOEID {woeid}")
+                return []
+
+            trends_data = data["data"]
+
+            # Format trends
+            trends = []
+            for idx, trend in enumerate(trends_data[:limit], start=1):
+                trend_name = trend.get("trend_name", "")
+                # Create search query from trend name
+                query = trend_name.replace("#", "%23").replace(" ", "%20")
+
+                trends.append({
+                    "name": trend_name,
+                    "url": f"https://x.com/search?q={query}",
+                    "query": trend_name,  # Keep original for searching
+                    "tweet_volume": trend.get("tweet_count"),
+                    "rank": idx
+                })
+
+            logger.info(f"Fetched {len(trends)} trending topics for WOEID {woeid}")
+
+            # Record successful X API call event
+            mon = _get_monitor()
+            if mon:
+                from monitoring import EventType
+                mon.activity.add_event(
+                    EventType.X_API_CALL,
+                    topic="trends",
+                    woeid=woeid,
+                    trends_count=len(trends),
+                    latency_ms=round(latency_ms, 1)
+                )
+
+            return trends
+
+        except requests.exceptions.Timeout:
+            raise XAPIError("X API request timed out")
+        except requests.exceptions.ConnectionError:
+            raise XAPIError("Failed to connect to X API")
+        except (XAuthenticationError, XRateLimitError, XAPIError):
+            raise
+        except Exception as e:
+            raise XAPIError(f"Unexpected error: {e}")
+
+
 __all__ = [
     "XAdapter",
     "XAdapterError",
-    "XAuthenticationError", 
+    "XAuthenticationError",
     "XRateLimitError",
     "XAPIError",
     "Tick",  # Re-export for convenience

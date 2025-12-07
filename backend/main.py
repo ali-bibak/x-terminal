@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from adapter.grok import GrokAdapter
 from adapter.rate_limiter import RateLimiter
 from adapter.x import XAdapter
-from aggregator import BarAggregator, DigestService
+from aggregator import DigestService
 from api import router, set_dependencies
 from core import TickPoller, TopicManager
 from database import init_db
@@ -73,12 +73,8 @@ async def lifespan(app: FastAPI):
         x_adapter=x_adapter, grok_adapter=grok_adapter, default_resolution="5m"
     )
 
-    # Create a shared aggregator for digest service
-    # (DigestService uses topic_manager's per-topic aggregators internally)
-    shared_aggregator = BarAggregator(grok_adapter=grok_adapter)
-    digest_service = DigestService(
-        grok_adapter=grok_adapter, bar_aggregator=shared_aggregator
-    )
+    # Initialize digest service (gets bars from topic_manager when needed)
+    digest_service = DigestService(grok_adapter=grok_adapter)
 
     # Initialize poller (polls every 5 minutes by default)
     poll_interval = int(os.environ.get("POLL_INTERVAL", "300"))

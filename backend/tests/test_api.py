@@ -328,14 +328,10 @@ class TestAPIEndpoints:
     def client(self, topic_manager_with_data, mock_grok_adapter):
         """Create test client with mocked services."""
         from api import set_dependencies
-        from aggregator import DigestService, BarAggregator
+        from aggregator import DigestService
         
         # Create digest service with mock
-        aggregator = BarAggregator(grok_adapter=mock_grok_adapter)
-        digest_service = DigestService(
-            grok_adapter=mock_grok_adapter,
-            bar_aggregator=topic_manager_with_data._aggregators.get("tsla", aggregator)
-        )
+        digest_service = DigestService(grok_adapter=mock_grok_adapter)
         
         poller = TickPoller(topic_manager_with_data, poll_interval=300)
         
@@ -457,11 +453,8 @@ class TestAPIDigest:
         from api import set_dependencies
         from aggregator import DigestService
         
-        # Use the topic manager's aggregator for the digest service
-        digest_service = DigestService(
-            grok_adapter=mock_grok_adapter,
-            bar_aggregator=topic_manager_with_data._aggregators["tsla"]
-        )
+        # DigestService now gets bars passed directly from API route
+        digest_service = DigestService(grok_adapter=mock_grok_adapter)
         
         poller = TickPoller(topic_manager_with_data, poll_interval=300)
         set_dependencies(topic_manager_with_data, poller, digest_service)
@@ -492,7 +485,7 @@ class TestFullFlow:
     def fresh_client(self, mock_x_adapter, mock_grok_adapter, sample_ticks):
         """Create a fresh test client with mocked adapters."""
         from api import set_dependencies
-        from aggregator import DigestService, BarAggregator
+        from aggregator import DigestService
         
         # Create fresh manager
         manager = TopicManager(
@@ -500,11 +493,8 @@ class TestFullFlow:
             grok_adapter=mock_grok_adapter
         )
         
-        aggregator = BarAggregator(grok_adapter=mock_grok_adapter)
-        digest_service = DigestService(
-            grok_adapter=mock_grok_adapter,
-            bar_aggregator=aggregator
-        )
+        # DigestService now gets bars passed directly from API route
+        digest_service = DigestService(grok_adapter=mock_grok_adapter)
         
         poller = TickPoller(manager, poll_interval=300, generate_summaries=True)
         set_dependencies(manager, poller, digest_service)

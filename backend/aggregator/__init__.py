@@ -218,32 +218,34 @@ class BarAggregator:
 class DigestService:
     """
     Service for creating topic digests from aggregated bars.
+    
+    Note: This service doesn't store bars itself. Bars should be passed
+    directly to create_digest() or fetched from TopicManager.
     """
 
-    def __init__(self, grok_adapter: GrokAdapter, bar_aggregator: BarAggregator):
+    def __init__(self, grok_adapter: GrokAdapter):
         """
         Initialize the DigestService.
         
         Args:
             grok_adapter: GrokAdapter for generating digests
-            bar_aggregator: BarAggregator to fetch bars from
         """
         self.grok_adapter = grok_adapter
-        self.bar_aggregator = bar_aggregator
 
-    def create_digest(self, topic: str, lookback_bars: int = 12) -> TopicDigest:
+    def create_digest(self, topic: str, bars: List[Bar], lookback_bars: int = 12) -> TopicDigest:
         """
-        Create a digest for a topic based on recent bars.
+        Create a digest for a topic based on provided bars.
         
         Args:
             topic: Topic to create digest for
-            lookback_bars: Number of bars to include (default: 12)
+            bars: List of Bar objects to summarize
+            lookback_bars: Maximum number of bars to include (default: 12)
         
         Returns:
             TopicDigest from Grok
         """
-        # Get recent bars
-        bars = self.bar_aggregator.get_bars(topic=topic, limit=lookback_bars)
+        # Limit bars to lookback count
+        bars = bars[:lookback_bars] if bars else []
         
         if not bars:
             logger.warning(f"No bars found for topic {topic}")

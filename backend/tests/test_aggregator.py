@@ -337,21 +337,18 @@ class TestDigestService:
     def test_digest_service_init(self):
         """Test initializing the DigestService."""
         mock_grok = Mock()
-        aggregator = BarAggregator(grok_adapter=mock_grok)
         
-        service = DigestService(grok_adapter=mock_grok, bar_aggregator=aggregator)
+        service = DigestService(grok_adapter=mock_grok)
         
         assert service.grok_adapter == mock_grok
-        assert service.bar_aggregator == aggregator
 
     def test_create_digest_no_bars(self):
         """Test creating digest when no bars exist."""
         mock_grok = Mock()
-        aggregator = BarAggregator(grok_adapter=mock_grok)
         
-        service = DigestService(grok_adapter=mock_grok, bar_aggregator=aggregator)
+        service = DigestService(grok_adapter=mock_grok)
         
-        digest = service.create_digest("$TSLA")
+        digest = service.create_digest("$TSLA", bars=[])
         
         assert digest.topic == "$TSLA"
         assert "No recent activity" in digest.overall_summary
@@ -381,15 +378,18 @@ class TestDigestService:
         
         # Create some bars
         now = datetime.now(timezone.utc)
+        bars = []
         for i in range(3):
             start = now - timedelta(minutes=(i+1)*5)
             end = start + timedelta(minutes=5)
             ticks = [create_tick(f"tick{i}", topic="$TSLA", timestamp=start)]
-            aggregator.create_bar("$TSLA", ticks, start, end)
+            bar = aggregator.create_bar("$TSLA", ticks, start, end)
+            bars.append(bar)
         
-        service = DigestService(grok_adapter=mock_grok, bar_aggregator=aggregator)
+        service = DigestService(grok_adapter=mock_grok)
         
-        digest = service.create_digest("$TSLA")
+        # Pass bars directly to create_digest
+        digest = service.create_digest("$TSLA", bars=bars)
         
         assert digest == mock_digest
         mock_grok.create_topic_digest.assert_called_once()
@@ -408,12 +408,12 @@ class TestDigestService:
         
         now = datetime.now(timezone.utc)
         ticks = [create_tick("tick1", topic="$TSLA")]
-        aggregator.create_bar("$TSLA", ticks, now - timedelta(minutes=5), now)
+        bar = aggregator.create_bar("$TSLA", ticks, now - timedelta(minutes=5), now)
         
-        service = DigestService(grok_adapter=mock_grok, bar_aggregator=aggregator)
+        service = DigestService(grok_adapter=mock_grok)
         
         with pytest.raises(RuntimeError) as exc_info:
-            service.create_digest("$TSLA")
+            service.create_digest("$TSLA", bars=[bar])
         
         assert "Failed to generate digest" in str(exc_info.value)
 

@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
 
 from core import TopicManager, Topic, TopicStatus, TickPoller
-from aggregator import Bar, BarSummary, DigestService
+from aggregator import Bar, DigestService
 
 logger = logging.getLogger(__name__)
 
@@ -365,8 +365,15 @@ async def create_digest(
     if not topic:
         raise HTTPException(status_code=404, detail=f"Topic '{topic_id}' not found")
     
+    # Get bars from TopicManager (where they're actually stored)
+    bars = manager.get_bars(topic_id, limit=lookback_bars)
+    
     try:
-        digest = digest_service.create_digest(topic.label, lookback_bars=lookback_bars)
+        digest = digest_service.create_digest(
+            topic=topic.label,
+            bars=bars,
+            lookback_bars=lookback_bars
+        )
         
         return DigestResponse(
             topic=digest.topic,

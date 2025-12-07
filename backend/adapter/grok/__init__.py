@@ -253,9 +253,24 @@ Highlight post IDs: {highlight_posts}"""
 
         payload = self._structured_call(
             model=self.fast_model,
-            system_prompt="""You are summarizing a time window of social media posts for a live monitoring dashboard.
-Create a brief, structured summary focused on what happened in this specific time window.
-For sentiment, return a float between 0.0 (very negative) and 1.0 (very positive), with 0.5 being neutral.""",
+            system_prompt="""You are a critical analyst summarizing social media posts for a professional trading/monitoring dashboard.
+
+SENTIMENT SCORING (be critical and precise):
+- 0.0-0.2: Very negative (panic, crashes, scams exposed, major bad news)
+- 0.2-0.4: Negative (concerns, doubt, bearish sentiment, criticism)
+- 0.4-0.6: Neutral (mixed signals, factual updates, no clear direction)
+- 0.6-0.8: Positive (optimism, good news, bullish but measured)
+- 0.8-1.0: Very positive (euphoria, major wins, breakthrough news)
+
+CRITICAL ANALYSIS RULES:
+1. Promotional spam, giveaway scams, and bot-like content should LOWER sentiment (treat as noise/negative signal)
+2. "Moon" talk without substance = skeptical (0.5-0.6 max)
+3. Distinguish genuine news from hype - hype alone is NOT positive
+4. FUD (fear, uncertainty, doubt) without evidence = slight negative (0.4-0.5)
+5. Legitimate concerns or risks = reflect in lower sentiment
+6. Default to neutral (0.5) when content is mixed or unclear
+
+Be skeptical. Most crypto social media is noise. Only rate highly positive (>0.7) for genuine good news with substance.""",
             user_prompt=user_prompt,
             schema=BarSummary,
         )

@@ -11,10 +11,24 @@ from typing import Any, Dict, List, Optional
 DB_PATH = Path(__file__).parent.parent / "db.sqlite3"
 
 
-def init_db():
-    """Initialize the database with schema."""
+def init_db(reset: bool = False):
+    """
+    Initialize the database with schema.
+
+    Args:
+        reset: If True, drops all existing tables and recreates them (fresh start).
+               If False, only creates tables if they don't exist (preserves data).
+    """
     schema_path = Path(__file__).parent / "schema.sql"
     with sqlite3.connect(DB_PATH) as conn:
+        if reset:
+            # Drop all tables for a fresh start
+            conn.execute("DROP TABLE IF EXISTS digests")
+            conn.execute("DROP TABLE IF EXISTS ticks")
+            conn.execute("DROP TABLE IF EXISTS bars")
+            conn.execute("DROP TABLE IF EXISTS topics")
+
+        # Create tables (will skip if they exist and reset=False)
         with open(schema_path) as f:
             conn.executescript(f.read())
         conn.commit()
@@ -178,5 +192,12 @@ class Database:
             return dict(row) if row else None
 
 
-# Initialize database on import
-init_db()
+def reset_db():
+    """Completely reset the database (delete all data and recreate schema)."""
+    init_db(reset=True)
+
+
+# Initialize database on first import (preserves existing data)
+init_db(reset=False)
+
+__all__ = ["init_db", "reset_db", "get_db", "Database"]

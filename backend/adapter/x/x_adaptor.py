@@ -84,4 +84,6 @@ class XAdaptor:
         except Exception as e:
             print(f"Unexpected error: {e}")
             return []
+        
+all = ["XAdaptor"]
 

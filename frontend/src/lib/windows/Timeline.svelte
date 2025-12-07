@@ -28,7 +28,7 @@
   }
 
   async function getBarsInfo() {
-    barsInfo = await api.getBars(id);
+    barsInfo = (await api.getBars(id)).filter((b) => b.post_count > 0);
   }
 
   async function getLatestBars() {
@@ -42,7 +42,7 @@
     getTopicInfo();
     getBarsInfo();
 
-    const free = setInterval(getLatestBars, 1000);
+    const free = setInterval(getLatestBars, 10000);
 
     return () => {
       clearInterval(free);
@@ -122,13 +122,12 @@
 
 <div class="flex flex-col py-2">
   {#each barsInfo as bars, i}
-    <TimelineEvent
-      timestamp={bars.start}
-      content={bars.summary as string}
-      isLast={i === barsInfo.length - 1}
-    />
+    <TimelineEvent content={bars} isLast={i === barsInfo.length - 1} />
   {/each}
-  <TimelineEvent timestamp="Notable Tweet" content="" isLast={true} />
+  {#if barsInfo.length === 0}
+    <h1 class="font-bold text-3xl mt-5">Waiting for posts...</h1>
+    <p>It's empty now, but it won't be for long.</p>
+  {/if}
 </div>
 
 <style>

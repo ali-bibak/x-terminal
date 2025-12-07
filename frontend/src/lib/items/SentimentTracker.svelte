@@ -4,6 +4,7 @@
   }
 
   let { data = [] }: Props = $props();
+  let selected: "SENTIMENT" | "VOLUME" = "SENTIMENT";
 
   const width = 400;
   const height = 20;
@@ -33,14 +34,18 @@
 
 <div class="w-full">
   <div class="flex items-center justify-between mb-2">
-    <h3 class="text-sm font-medium text-stone-400">Sentiment</h3>
-    <span class="text-sm" style="color: {getColor(data[data.length - 1])}">
-      {data[data.length - 1] > 0
-        ? "Positive"
-        : data[data.length - 1] < 0
-          ? "Negative"
-          : "Neutral"}
-    </span>
+    {#if selected === "SENTIMENT"}
+      <h3 class="text-sm font-medium text-stone-400">Sentiment</h3>
+      <span class="text-sm" style="color: {getColor(data[data.length - 1])}">
+        {data[data.length - 1] > 0
+          ? "Positive"
+          : data[data.length - 1] < 0
+            ? "Negative"
+            : "Neutral"}
+      </span>
+    {:else if selected === "VOLUME"}
+      <h3 class="text-sm font-medium text-stone-400">Volume</h3>
+    {/if}
   </div>
 
   <svg

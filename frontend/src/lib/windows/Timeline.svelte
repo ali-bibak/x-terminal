@@ -1,15 +1,53 @@
 <script lang="ts">
+  import api from "$lib/api";
   import LiveBadge from "$lib/items/LiveBadge.svelte";
   import SentimentTracker from "$lib/items/SentimentTracker.svelte";
   import TimelineEvent from "$lib/items/TimelineEvent.svelte";
+  import {
+    nullopt,
+    type BarResponse,
+    type Optional,
+    type TopicResponse,
+  } from "$lib/types";
   import { ArrowLeft, Bookmark, Ellipsis, Share } from "lucide-svelte";
+  import { onMount } from "svelte";
 
   interface Props {
+    id: string;
     title?: string;
     onBack?: () => void;
   }
 
-  let { title = "Topic Timeline", onBack }: Props = $props();
+  let { title = "Topic Timeline", onBack, id }: Props = $props();
+
+  let topicInfo: Optional<TopicResponse> = $state(nullopt);
+  let barsInfo: BarResponse[] = $state([]);
+
+  async function getTopicInfo() {
+    topicInfo = await api.getTopic(id);
+  }
+
+  async function getBarsInfo() {
+    barsInfo = await api.getBars(id);
+  }
+
+  async function getLatestBars() {
+    const newBar = await api.getLatestBar(id);
+    if (barsInfo.length > 0 && newBar.end !== barsInfo[0].end) {
+      barsInfo = [newBar, ...barsInfo];
+    }
+  }
+
+  onMount(() => {
+    getTopicInfo();
+    getBarsInfo();
+
+    const free = setInterval(getLatestBars, 1000);
+
+    return () => {
+      clearInterval(free);
+    };
+  });
 
   type TimeInterval = "1min" | "5min" | "1hour";
   let selectedInterval = $state<TimeInterval>("1min");
@@ -44,7 +82,9 @@
     Live updates and analysis for this trending topic. Follow along as events
     unfold in real-time with AI-powered insights from Grok.
   </p>
-  <SentimentTracker />
+  <SentimentTracker
+    data={barsInfo.map((bar) => parseFloat(bar.sentiment as string))}
+  />
   <div class="flex flex-row gap-x-2 align-center">
     <img src="/grok.svg" class="text-stone-800 w-5 h-5" alt="Grok" />
     <p class="text-stone-500 text-sm">Continuously updated with Grok</p>
@@ -81,10 +121,11 @@
 </div>
 
 <div class="flex flex-col py-2">
-  {#each Array(5) as _, i}
+  {#each barsInfo as bars, i}
     <TimelineEvent
-      content="Timeline event {i + 1} for {title}"
-      isLast={i === 4}
+      timestamp={bars.start}
+      content={bars.summary as string}
+      isLast={i === barsInfo.length - 1}
     />
   {/each}
   <TimelineEvent timestamp="Notable Tweet" content="" isLast={true} />

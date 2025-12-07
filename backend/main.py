@@ -5,6 +5,7 @@ Run with:
     uvicorn main:app --reload --port 8000
 """
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -18,10 +19,11 @@ from adapter.grok import GrokAdapter
 from adapter.rate_limiter import RateLimiter
 from adapter.x import XAdapter
 from aggregator import DigestService, BarStore, MIN_RESOLUTION_SECONDS, DEFAULT_RESOLUTION
-from api import router, set_dependencies, set_rate_limiter
+from api import router, set_dependencies, set_location_dependencies, set_rate_limiter
 from core import TickPoller, TopicManager, BarScheduler
 from database import init_db
 from monitoring import monitor, EventType
+from services import LocationService, TrendsCache
 
 # Load environment variables
 load_dotenv()
@@ -157,6 +159,11 @@ async def lifespan(app: FastAPI):
         poll_interval=poll_interval,
     )
 
+    # Initialize location and trends services
+    cache_ttl = int(os.environ.get("TRENDS_CACHE_TTL", "900"))  # 15 min default
+    trends_cache = TrendsCache(ttl_seconds=cache_ttl)
+    location_service = LocationService()
+
     # Initialize bar scheduler
     # Generates bars periodically at each resolution and stores in BarStore
     bar_scheduler = BarScheduler(
@@ -167,7 +174,14 @@ async def lifespan(app: FastAPI):
 
     # Set dependencies for API routes
     set_dependencies(topic_manager, tick_poller, digest_service)
+    set_location_dependencies(location_service, trends_cache, x_adapter)
     set_rate_limiter(rate_limiter)
+
+    # Start background cache cleanup
+    asyncio.create_task(trends_cache.start_cleanup_task())
+
+    logger.info("✓ Location service initialized")
+    logger.info(f"✓ Trends cache initialized (TTL: {cache_ttl}s)")
 
     # Configure monitoring
     monitor.set_component_status(

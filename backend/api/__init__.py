@@ -126,6 +126,48 @@ class PollResponse(BaseModel):
     total_ticks: int = 0
 
 
+class LocationRequest(BaseModel):
+    """Request to resolve a location to WOEID."""
+    latitude: Optional[float] = Field(default=None, description="Latitude (-90 to 90)")
+    longitude: Optional[float] = Field(default=None, description="Longitude (-180 to 180)")
+    ip_address: Optional[str] = Field(default=None, description="IP address to geolocate (use 'auto' to extract from request)")
+
+
+class WOEIDResponse(BaseModel):
+    """WOEID resolution response."""
+    woeid: int
+    location_name: str
+    country: str
+    source: str = Field(description="Source of location: 'coordinates', 'ip', or 'default'")
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+
+
+class TrendingTopic(BaseModel):
+    """A single trending topic."""
+    name: str = Field(description="Topic name/hashtag")
+    url: str = Field(description="X URL for the topic")
+    query: str = Field(description="Search query string")
+    tweet_volume: Optional[int] = Field(default=None, description="Number of tweets (may be None)")
+    rank: int = Field(description="Ranking position (1-based)")
+
+
+class TrendingTopicsResponse(BaseModel):
+    """Trending topics response with cache metadata."""
+    woeid: int
+    location_name: str
+    country: str
+    trends: List[TrendingTopic]
+    cached: bool = Field(description="Whether this response was served from cache")
+    cached_at: Optional[datetime] = Field(default=None, description="When trends were cached")
+    expires_at: Optional[datetime] = Field(default=None, description="When cache expires")
+
+
+class LocationListResponse(BaseModel):
+    """Response with list of available locations."""
+    locations: List[dict]
+
+
 # ============================================================================
 # Dependency Injection - these get set by the main app
 # ============================================================================
@@ -133,6 +175,11 @@ class PollResponse(BaseModel):
 _topic_manager: Optional[TopicManager] = None
 _tick_poller: Optional[TickPoller] = None
 _digest_service: Optional[DigestService] = None
+
+# Location and trends services
+_location_service = None
+_trends_cache = None
+_x_adapter = None
 
 
 def set_dependencies(
@@ -145,6 +192,14 @@ def set_dependencies(
     _topic_manager = topic_manager
     _tick_poller = tick_poller
     _digest_service = digest_service
+
+
+def set_location_dependencies(location_service, trends_cache, x_adapter):
+    """Set the location and trends service dependencies (called from main app)."""
+    global _location_service, _trends_cache, _x_adapter
+    _location_service = location_service
+    _trends_cache = trends_cache
+    _x_adapter = x_adapter
 
 
 def get_topic_manager() -> TopicManager:
@@ -163,6 +218,24 @@ def get_digest_service() -> DigestService:
     if _digest_service is None:
         raise HTTPException(status_code=503, detail="Service not initialized")
     return _digest_service
+
+
+def get_location_service():
+    if _location_service is None:
+        raise HTTPException(status_code=503, detail="Location service not initialized")
+    return _location_service
+
+
+def get_trends_cache():
+    if _trends_cache is None:
+        raise HTTPException(status_code=503, detail="Trends cache not initialized")
+    return _trends_cache
+
+
+def get_x_adapter():
+    if _x_adapter is None:
+        raise HTTPException(status_code=503, detail="X adapter not initialized")
+    return _x_adapter
 
 
 # ============================================================================
@@ -467,6 +540,272 @@ async def create_digest(
         raise HTTPException(status_code=500, detail=f"Failed to generate digest: {e}")
 
 
+# ----------------------------------------------------------------------------
+# Location & Trending Topics
+# ----------------------------------------------------------------------------
+
+@router.get("/locations", response_model=LocationListResponse, tags=["Trending"])
+async def list_locations(location_service = Depends(get_location_service)):
+    """
+    List all available locations with WOEID mapping.
+
+    Returns a list of cities that can be used to fetch trending topics.
+    """
+    locations = location_service.list_available_locations()
+    return LocationListResponse(locations=locations)
+
+
+@router.post("/location/resolve", response_model=WOEIDResponse, tags=["Trending"])
+async def resolve_location(
+    request: LocationRequest,
+    location_service = Depends(get_location_service)
+):
+    """
+    Resolve a user location (coordinates or IP) to a WOEID.
+
+    Supports:
+    - GPS coordinates (latitude, longitude)
+    - IP address (automatic geolocation)
+    - Use ip_address="auto" to extract IP from the request
+
+    Returns the nearest city WOEID for fetching trending topics.
+    """
+    from fastapi import Request as FastAPIRequest
+
+    # Handle coordinates
+    if request.latitude is not None and request.longitude is not None:
+        try:
+            result = location_service.resolve_woeid_from_coordinates(
+                request.latitude,
+                request.longitude
+            )
+            return WOEIDResponse(
+                woeid=result.woeid,
+                location_name=result.location_name,
+                country=result.country,
+                source="coordinates",
+                latitude=result.latitude,
+                longitude=result.longitude
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid coordinates: {e}")
+
+    # Handle IP address
+    elif request.ip_address:
+        # Note: In production, you'd extract the real client IP from request headers
+        # For now, we'll use a placeholder
+        ip = request.ip_address if request.ip_address != "auto" else "8.8.8.8"
+
+        try:
+            result = location_service.resolve_woeid_from_ip(ip)
+            return WOEIDResponse(
+                woeid=result.woeid,
+                location_name=result.location_name,
+                country=result.country,
+                source="ip",
+                latitude=result.latitude,
+                longitude=result.longitude
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"IP geolocation failed: {e}")
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Must provide either (latitude, longitude) or ip_address"
+        )
+
+
+@router.get("/trends/{woeid}", response_model=TrendingTopicsResponse, tags=["Trending"])
+async def get_trending_topics(
+    woeid: int,
+    limit: int = Query(default=10, ge=1, le=50, description="Number of trends to return"),
+    location_service = Depends(get_location_service),
+    trends_cache = Depends(get_trends_cache),
+    x_adapter = Depends(get_x_adapter)
+):
+    """
+    Get trending topics for a specific WOEID.
+
+    Results are cached for 15 minutes to ensure fast responses and reduce API calls.
+
+    Use GET /locations to see available WOEIDs, or use WOEID 1 for Worldwide.
+    """
+    # Check cache first
+    cached_trends = trends_cache.get(woeid)
+    if cached_trends:
+        metadata = trends_cache.get_metadata(woeid)
+
+        # Get location name
+        location_name = "Unknown"
+        country = "Unknown"
+        for loc_name, loc_data in location_service.WOEID_MAP.items():
+            if loc_data["woeid"] == woeid:
+                location_name = loc_name
+                country = loc_data["country"]
+                break
+
+        return TrendingTopicsResponse(
+            woeid=woeid,
+            location_name=location_name,
+            country=country,
+            trends=[TrendingTopic(**t) for t in cached_trends[:limit]],
+            cached=True,
+            cached_at=metadata["cached_at"],
+            expires_at=metadata["expires_at"]
+        )
+
+    # Fetch from X API
+    try:
+        trends = x_adapter.get_trending_topics(woeid, limit=limit)
+
+        # Cache the results
+        trends_cache.set(woeid, trends)
+
+        # Get location name
+        location_name = "Unknown"
+        country = "Unknown"
+        for loc_name, loc_data in location_service.WOEID_MAP.items():
+            if loc_data["woeid"] == woeid:
+                location_name = loc_name
+                country = loc_data["country"]
+                break
+
+        metadata = trends_cache.get_metadata(woeid)
+
+        return TrendingTopicsResponse(
+            woeid=woeid,
+            location_name=location_name,
+            country=country,
+            trends=[TrendingTopic(**t) for t in trends],
+            cached=False,
+            cached_at=metadata["cached_at"] if metadata else None,
+            expires_at=metadata["expires_at"] if metadata else None
+        )
+
+    except Exception as e:
+        # Try to return stale cache as fallback
+        stale_trends = trends_cache.get(woeid, allow_stale=True)
+        if stale_trends:
+            logger.warning(f"Returning stale cache for WOEID {woeid} due to error: {e}")
+
+            location_name = "Unknown"
+            country = "Unknown"
+            for loc_name, loc_data in location_service.WOEID_MAP.items():
+                if loc_data["woeid"] == woeid:
+                    location_name = loc_name
+                    country = loc_data["country"]
+                    break
+
+            metadata = trends_cache.get_metadata(woeid)
+
+            return TrendingTopicsResponse(
+                woeid=woeid,
+                location_name=location_name,
+                country=country,
+                trends=[TrendingTopic(**t) for t in stale_trends[:limit]],
+                cached=True,
+                cached_at=metadata["cached_at"] if metadata else None,
+                expires_at=metadata["expires_at"] if metadata else None
+            )
+
+        # No cache available, raise error
+        raise HTTPException(status_code=500, detail=f"Failed to fetch trending topics: {e}")
+
+
+@router.post("/trends/for-location", response_model=TrendingTopicsResponse, tags=["Trending"])
+async def get_trends_for_location(
+    request: LocationRequest,
+    limit: int = Query(default=10, ge=1, le=50, description="Number of trends to return"),
+    location_service = Depends(get_location_service),
+    trends_cache = Depends(get_trends_cache),
+    x_adapter = Depends(get_x_adapter)
+):
+    """
+    Combined endpoint: resolve location and fetch trending topics.
+
+    This is the primary frontend endpoint. It:
+    1. Resolves your location (coordinates or IP) to a WOEID
+    2. Fetches trending topics for that WOEID (with caching)
+
+    Supports:
+    - GPS coordinates (latitude, longitude)
+    - IP address (ip_address="auto" to use request IP)
+    - Fallback to Worldwide if location detection fails
+    """
+    # Resolve location to WOEID
+    woeid = 1  # Default to Worldwide
+    location_name = "Worldwide"
+    country = "Global"
+
+    try:
+        if request.latitude is not None and request.longitude is not None:
+            result = location_service.resolve_woeid_from_coordinates(
+                request.latitude,
+                request.longitude
+            )
+            woeid = result.woeid
+            location_name = result.location_name
+            country = result.country
+        elif request.ip_address:
+            ip = request.ip_address if request.ip_address != "auto" else "8.8.8.8"
+            result = location_service.resolve_woeid_from_ip(ip)
+            woeid = result.woeid
+            location_name = result.location_name
+            country = result.country
+    except Exception as e:
+        logger.warning(f"Location resolution failed, using Worldwide: {e}")
+        # Continue with default Worldwide WOEID
+
+    # Fetch trending topics (reuse logic from get_trending_topics)
+    cached_trends = trends_cache.get(woeid)
+    if cached_trends:
+        metadata = trends_cache.get_metadata(woeid)
+        return TrendingTopicsResponse(
+            woeid=woeid,
+            location_name=location_name,
+            country=country,
+            trends=[TrendingTopic(**t) for t in cached_trends[:limit]],
+            cached=True,
+            cached_at=metadata["cached_at"],
+            expires_at=metadata["expires_at"]
+        )
+
+    # Fetch from X API
+    try:
+        trends = x_adapter.get_trending_topics(woeid, limit=limit)
+        trends_cache.set(woeid, trends)
+        metadata = trends_cache.get_metadata(woeid)
+
+        return TrendingTopicsResponse(
+            woeid=woeid,
+            location_name=location_name,
+            country=country,
+            trends=[TrendingTopic(**t) for t in trends],
+            cached=False,
+            cached_at=metadata["cached_at"] if metadata else None,
+            expires_at=metadata["expires_at"] if metadata else None
+        )
+
+    except Exception as e:
+        # Try stale cache
+        stale_trends = trends_cache.get(woeid, allow_stale=True)
+        if stale_trends:
+            logger.warning(f"Returning stale cache for WOEID {woeid}: {e}")
+            metadata = trends_cache.get_metadata(woeid)
+            return TrendingTopicsResponse(
+                woeid=woeid,
+                location_name=location_name,
+                country=country,
+                trends=[TrendingTopic(**t) for t in stale_trends[:limit]],
+                cached=True,
+                cached_at=metadata["cached_at"] if metadata else None,
+                expires_at=metadata["expires_at"] if metadata else None
+            )
+
+        raise HTTPException(status_code=500, detail=f"Failed to fetch trending topics: {e}")
+
+
 # ============================================================================
 # Monitoring & Observability
 # ============================================================================
@@ -675,5 +1014,5 @@ async def get_live_stats(manager: TopicManager = Depends(get_topic_manager)):
     }
 
 
-__all__ = ["router", "set_dependencies", "set_rate_limiter"]
+__all__ = ["router", "set_dependencies", "set_location_dependencies", "set_rate_limiter"]
 

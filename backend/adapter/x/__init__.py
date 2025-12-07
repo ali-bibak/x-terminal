@@ -295,9 +295,10 @@ class XAdapter:
         else:
             start_str, end_str = self._get_time_bounds(minutes)
         
-        # Build query - exclude retweets by default if not specified
-        if "-is:retweet" not in query.lower():
-            query = f"{query} -is:retweet"
+        filters = ["-is:retweet", "-is:reply", "-is:quote"]
+        for f in filters:
+            if f not in query.lower():
+                query += f" "
         
         params = {
             "query": query,

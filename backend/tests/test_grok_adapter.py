@@ -16,7 +16,7 @@ from adapter.grok.mocks import (
     mock_fact_check_report,
     mock_digest_overview
 )
-from adapter.x import Tick
+from adapter.models import Tick
 from adapter.rate_limiter import RateLimiter, RateLimitConfig
 
 

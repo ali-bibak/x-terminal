@@ -14,7 +14,7 @@ from dotenv import load_dotenv, find_dotenv
 from pydantic import BaseModel, Field
 
 from ..rate_limiter import RateLimiter, shared_limiter
-from ..x import Tick
+from ..models import Tick
 
 load_dotenv(find_dotenv(usecwd=True))
 
@@ -214,11 +214,11 @@ class GrokAdapter:
 
         user_prompt = f"""Topic: {topic}
 Time Window: {time_range}
-Posts ({len(posts)} total):
+Posts ({len(ticks)} total):
 
 {posts_text}
 
-{"... and " + str(len(posts) - 10) + " more posts" if len(posts) > 10 else ""}"""
+{"... and " + str(len(ticks) - 10) + " more posts" if len(ticks) > 10 else ""}"""
 
         payload = self._structured_call(
             model=self.fast_model,

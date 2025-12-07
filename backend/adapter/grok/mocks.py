@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any
 
 from . import IntelSummary, FactCheckReport, DigestOverview, BarSummary, TopicDigest
-from ..x import Tick
+from ..models import Tick
 
 
 def mock_rng(seed_source: str) -> random.Random:

@@ -99,6 +99,9 @@ The backend will expose these FastAPI endpoints:
 - **GrokAdapter**: Main interface to Grok API with structured responses
 - **XAdapter**: X API client for fetching posts as ticks
 - **RateLimiter**: Flexible rate limiting with multiple strategies and categories
+- **BarAggregator**: Aggregates ticks into time-bucketed bars
+- **DigestService**: Creates topic digests from aggregated bars
+- **Bar**: Pydantic model for time-bucketed aggregates
 - **BarSummary**: Pydantic model for time-window summaries
 - **TopicDigest**: Pydantic model for multi-bar analysis
 - **Tick**: Pydantic model for individual posts from X
@@ -111,10 +114,30 @@ The backend will expose these FastAPI endpoints:
 4. **Model Routing**: Fast model for summaries, careful model for digests
 5. **Error Resilience**: Graceful degradation with comprehensive logging
 
-### Data Flow
+### Data Flow (Polling-Based)
 
 ```
-X Posts → Ticks → BarAggregator → Bars + Summaries → Digest
+1. Poller triggers at bar close
+2. Poller fetches ticks from X API via XAdapter
+3. BarAggregator.create_bar(topic, ticks, start, end)
+   → Aggregates metrics
+   → Calls GrokAdapter.summarize_bar()
+   → Stores Bar with summary
+4. DigestService.create_digest(topic)
+   → Fetches recent bars
+   → Calls GrokAdapter.create_topic_digest()
+```
+
+```python
+# Example polling loop
+from aggregator import BarAggregator, get_previous_bar_window
+
+aggregator = BarAggregator(grok_adapter)
+
+# At each bar close
+start, end = get_previous_bar_window("5m")
+ticks = x_adapter.search_recent_posts(query="$TSLA", start_time=start, end_time=end)
+bar = aggregator.create_bar("$TSLA", ticks, start, end)
 ```
 
 ## Development

@@ -15,6 +15,10 @@
   <img src="https://img.shields.io/badge/Built%20in-24%20hours-orange" alt="Built in 24 hours">
 </p>
 
+<p align="center">
+  <img src="docs/demo.png" width="900" alt="X Terminal Dashboard">
+</p>
+
 ---
 
 ## 💡 The Problem

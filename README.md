@@ -90,8 +90,8 @@ X Terminal treats posts like **market ticks** and aggregates them into **time ba
 
 ### Low-Latency Design
 
-| Component | Role | Latency |
-|-----------|------|---------|
+| Component | Role |
+|-----------|------|
 | **TickStore** | Raw X posts in memory |
 | **BarScheduler** | Background bar generation + Grok |
 | **BarStore** | Pre-computed bars cache |

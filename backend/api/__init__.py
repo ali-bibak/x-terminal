@@ -426,6 +426,100 @@ async def poll_all_topics(poller: TickPoller = Depends(get_tick_poller)):
 
 
 # ----------------------------------------------------------------------------
+# Backfill (historical bars with summaries)
+# ----------------------------------------------------------------------------
+
+class BackfillRequest(BaseModel):
+    """Request for backfilling historical bars."""
+    resolution: str = Field(default="1h", description="Resolution for bars (e.g., '15s', '1m', '1h')")
+    count: int = Field(default=5, ge=1, le=100, description="Number of bars to generate")
+    generate_summaries: bool = Field(default=True, description="Generate Grok summaries (slower)")
+
+
+class BackfillResponse(BaseModel):
+    """Response from backfill operation."""
+    success: bool
+    message: str
+    bars_generated: int = 0
+    bars_with_summaries: int = 0
+    resolution: str = ""
+    time_range: Optional[str] = None
+
+
+@router.post("/topics/{topic_id}/backfill", response_model=BackfillResponse)
+async def backfill_bars(
+    topic_id: str,
+    request: BackfillRequest,
+    manager: TopicManager = Depends(get_topic_manager)
+):
+    """
+    🕐 Generate historical bars with summaries (on-demand, slower).
+    
+    Use this to backfill bars when you need historical data with summaries,
+    e.g., on startup to get the last 5 hourly summaries.
+    
+    This bypasses the normal fast BarStore route and generates fresh bars
+    with Grok summaries for each.
+    
+    **Note**: This is slower than normal GET /bars because it calls Grok
+    for each bar's summary. Use for initial data load, not real-time.
+    
+    Example:
+        POST /topics/bitcoin/backfill
+        {"resolution": "1h", "count": 5, "generate_summaries": true}
+    """
+    topic = manager.get_topic(topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail=f"Topic '{topic_id}' not found")
+    
+    if request.resolution not in RESOLUTION_MAP:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid resolution: {request.resolution}. Valid: {list(RESOLUTION_MAP.keys())}"
+        )
+    
+    try:
+        # Generate bars directly from tick data (bypassing BarStore cache)
+        bars = await manager.bar_generator.generate_bars_async(
+            topic=topic.label,
+            resolution=request.resolution,
+            limit=request.count,
+            generate_summaries=request.generate_summaries
+        )
+        
+        # Store in BarStore for future fast access
+        for bar in bars:
+            await manager.bar_store.add_bar(bar)
+        
+        bars_with_summaries = sum(1 for b in bars if b.summary is not None)
+        
+        # Calculate time range
+        if bars:
+            oldest = bars[-1].start.strftime('%Y-%m-%d %H:%M')
+            newest = bars[0].end.strftime('%Y-%m-%d %H:%M')
+            time_range = f"{oldest} to {newest}"
+        else:
+            time_range = None
+        
+        return BackfillResponse(
+            success=True,
+            message=f"Generated {len(bars)} {request.resolution} bars",
+            bars_generated=len(bars),
+            bars_with_summaries=bars_with_summaries,
+            resolution=request.resolution,
+            time_range=time_range
+        )
+        
+    except Exception as e:
+        logger.error(f"Backfill failed for {topic_id}: {e}")
+        return BackfillResponse(
+            success=False,
+            message=str(e),
+            resolution=request.resolution
+        )
+
+
+# ----------------------------------------------------------------------------
 # Digest
 # ----------------------------------------------------------------------------
 

@@ -8,7 +8,6 @@ Run with:
 import logging
 import os
 from contextlib import asynccontextmanager
-from msilib import init_database
 
 from dotenv import load_dotenv
 from fastapi import FastAPI

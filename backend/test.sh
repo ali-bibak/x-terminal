@@ -9,10 +9,7 @@ if [ ! -d "venv" ]; then
     exit 1
 fi
 
-# Activate virtual environment
-source venv/bin/activate
-
-# Run tests
-python -m pytest
+# Run tests using venv's Python directly (more reliable than source activate)
+./venv/bin/python -m pytest "$@"
 
 echo "Tests completed!"

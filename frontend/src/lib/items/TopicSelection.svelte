@@ -31,7 +31,9 @@
     {#if requested}
       <p class="text-stone-400 font-sm">231 People Interested</p>
     {:else}
-      <ProfilePictureCollection size={20} />
+      {#if tweetCount > 0}
+        <ProfilePictureCollection size={20} />
+      {/if}
       <p class="text-stone-400 font-sm">
         {formatTweetCount(tweetCount)} tweets
       </p>

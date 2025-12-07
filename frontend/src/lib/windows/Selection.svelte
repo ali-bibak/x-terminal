@@ -21,6 +21,8 @@
 
   onMount(() => {
     updateTopics();
+    const unsubscribe = setInterval(updateTopics, 5000);
+    return () => clearInterval(unsubscribe);
   });
 </script>
 

@@ -51,8 +51,10 @@ const api = {
       throw new Error(`Failed to resume topic: ${response.statusText}`);
     }
   },
-  getBars: async (id: string): Promise<BarResponse[]> => {
-    const response = await fetch(`${BASE_URL}/api/v1/topics/${id}/bars`);
+  getBars: async (id: string, resolution: string): Promise<BarResponse[]> => {
+    const response = await fetch(
+      `${BASE_URL}/api/v1/topics/${id}/bars?resolution=${resolution}`,
+    );
     return response.json();
   },
   getLatestBar: async (id: string): Promise<BarResponse> => {

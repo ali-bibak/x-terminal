@@ -28,12 +28,18 @@
   }
 
   async function getBarsInfo() {
-    barsInfo = (await api.getBars(id)).filter((b) => b.post_count > 0);
+    barsInfo = (await api.getBars(id, selectedInterval)).filter(
+      (b) => b.post_count > 0,
+    );
   }
 
   async function getLatestBars() {
     const newBar = await api.getLatestBar(id);
-    if (barsInfo.length > 0 && newBar.end !== barsInfo[0].end) {
+    if (
+      barsInfo.length > 0 &&
+      newBar.end !== barsInfo[0].end &&
+      newBar.post_count > 0
+    ) {
       barsInfo = [newBar, ...barsInfo];
     }
   }
@@ -49,8 +55,18 @@
     };
   });
 
-  type TimeInterval = "1min" | "5min" | "1hour";
-  let selectedInterval = $state<TimeInterval>("1min");
+  const TIME_INTERVALS = [
+    { value: "15s", label: "15s" },
+    { value: "30s", label: "30s" },
+    { value: "1m", label: "1m" },
+    { value: "5m", label: "5m" },
+    { value: "15m", label: "15m" },
+    { value: "30m", label: "30m" },
+    { value: "1h", label: "1h" },
+  ] as const;
+
+  type TimeInterval = (typeof TIME_INTERVALS)[number]["value"];
+  let selectedInterval = $state<TimeInterval>("1m");
 </script>
 
 <nav class="flex flex-col gap-y-2 pb-2">
@@ -91,33 +107,21 @@
   </div>
 </nav>
 <div class="border-y border-y-stone-800 -mx-4">
-  <button
-    onclick={() => (selectedInterval = "1min")}
-    class="hover:bg-stone-800 rounded-top-xl py-2 px-4 font-bold {selectedInterval ===
-    '1min'
-      ? 'active'
-      : ''}"
-  >
-    Every minute
-  </button>
-  <button
-    onclick={() => (selectedInterval = "5min")}
-    class="hover:bg-stone-800 rounded-top-xl py-2 px-4 font-bold {selectedInterval ===
-    '5min'
-      ? 'active'
-      : ''}"
-  >
-    5 Minutes
-  </button>
-  <button
-    onclick={() => (selectedInterval = "1hour")}
-    class="hover:bg-stone-800 rounded-top-xl py-2 px-4 font-bold {selectedInterval ===
-    '1hour'
-      ? 'active'
-      : ''}"
-  >
-    1 hour
-  </button>
+  {#each TIME_INTERVALS as interval}
+    <button
+      onclick={() => {
+        selectedInterval = interval.value;
+        barsInfo = [];
+        getBarsInfo();
+      }}
+      class="hover:bg-stone-800 rounded-top-xl py-2 px-4 font-bold {selectedInterval ===
+      interval.value
+        ? 'active'
+        : ''}"
+    >
+      {interval.label}
+    </button>
+  {/each}
 </div>
 
 <div class="flex flex-col py-2">

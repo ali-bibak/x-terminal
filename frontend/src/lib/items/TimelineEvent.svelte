@@ -28,6 +28,9 @@
   <div class="flex-1">
     <p class="text-stone-400 text-sm mb-1">{formattedTime}</p>
     <p>{content.summary}</p>
+    <p class="text-stone-700 text-sm mt-1 mb-2">
+      {content.post_count} Posts · {content.total_likes} Likes
+    </p>
     {#if factCheckedByGrok === "FALSE"}
       <div class="text-red-400 text-sm mb-1 flex flex-row items-center">
         <X class="h-4" />

@@ -658,7 +658,6 @@ async def get_live_stats(manager: TopicManager = Depends(get_topic_manager)):
         "topics_active": len(active_topics),
         "total_ticks": total_ticks,
         "ticks_per_minute": round(metrics["data_pipeline"]["ticks_per_minute"], 1),
-        "cache_hit_rate": metrics["cache"]["hit_rate"],
         "rate_limit_status": rate_limit_status,
         "grok_calls": metrics["grok_api"]["calls"],
         "x_api_calls": metrics["x_api"]["calls"],

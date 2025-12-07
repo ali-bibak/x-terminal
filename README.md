@@ -16,7 +16,6 @@ X Terminal aggregates X posts into time-based "bars" (like market data) and uses
 - **Multi-Resolution Bars** — Switch between 15s, 30s, 1m, 5m, 15m, 30m, 1h views instantly
 - **AI Summaries** — Grok-powered summaries for each bar (what happened?)
 - **Topic Digests** — One-shot analysis across multiple bars (what's the trend?)
-- **Smart Caching** — Summary cache for instant resolution switching
 - **Real-time Monitoring** — Live metrics, rate limits, and activity feed
 - **Terminal Aesthetic** — Dark theme with Bloomberg/terminal vibes
 
@@ -34,7 +33,6 @@ X Terminal aggregates X posts into time-based "bars" (like market data) and uses
                                       │  ┌────▼──────────────▼─────────────┐   │
                                       │  │   TickStore (raw posts)         │   │
                                       │  │   BarGenerator (on-demand)      │   │
-                                      │  │   SummaryCache (fast switching) │   │
                                       │  │   TopicManager / DigestService  │   │
                                       │  └─────────────────────────────────┘   │
                                       │                                         │
@@ -54,13 +52,11 @@ X Terminal aggregates X posts into time-based "bars" (like market data) and uses
 X Terminal stores raw ticks and generates bars **on-demand** at any resolution:
 
 1. **TickStore** — Raw posts stored per topic
-2. **BarGenerator** — Groups ticks into bars at requested resolution
-3. **SummaryCache** — Caches Grok summaries for instant resolution switching
+2. **BarGenerator** — Groups ticks into bars at requested resolution + Grok summaries
 
 This enables:
 - ⚡ Instant switching between 15s, 1m, 5m views
 - 🎯 High-quality summaries (always from raw data)
-- 💰 Efficient API usage (summaries cached)
 
 ## 📁 Project Structure
 
@@ -72,7 +68,7 @@ x-terminal/
 │   │   ├── grok/           # Grok AI adapter
 │   │   ├── models.py       # Shared Pydantic models (Tick)
 │   │   └── rate_limiter.py # Shared rate limiting
-│   ├── aggregator/         # TickStore, BarGenerator, SummaryCache, DigestService
+│   ├── aggregator/         # TickStore, BarGenerator, DigestService
 │   ├── core/               # TopicManager, TickPoller
 │   ├── api/                # FastAPI routes
 │   ├── monitoring/         # 📊 Metrics, health, activity feed
@@ -230,8 +226,9 @@ The monitoring endpoints provide high-ROI observability:
   "topics_active": 3,
   "total_ticks": 2500,
   "ticks_per_minute": 18.5,
-  "cache_hit_rate": "90.0%",
-  "rate_limit_status": "ok"
+  "rate_limit_status": "ok",
+  "grok_calls": 45,
+  "x_api_calls": 120
 }
 ```
 

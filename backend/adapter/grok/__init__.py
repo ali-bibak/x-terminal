@@ -16,6 +16,19 @@ from pydantic import BaseModel, Field
 from ..rate_limiter import RateLimiter, shared_limiter
 from ..models import Tick
 
+# Import monitoring (lazy to avoid circular imports)
+_monitor = None
+
+def _get_monitor():
+    global _monitor
+    if _monitor is None:
+        try:
+            from monitoring import monitor
+            _monitor = monitor
+        except ImportError:
+            _monitor = None
+    return _monitor
+
 load_dotenv(find_dotenv(usecwd=True))
 
 # Configure logging
@@ -118,6 +131,8 @@ class GrokAdapter:
             logger.debug("No client available, returning None")
             return None
 
+        start_time_ms = time.time() * 1000
+        
         try:
             # Apply rate limiting with appropriate category
             category = "grok_reasoning" if model == self.reasoning_model else "grok_fast"
@@ -131,7 +146,22 @@ class GrokAdapter:
                 chat.append(system(system_prompt))
                 chat.append(user(user_prompt))
                 _, payload = chat.parse(schema)  # type: ignore[arg-type]
-                logger.debug("API call successful")
+                
+                latency_ms = (time.time() * 1000) - start_time_ms
+                logger.debug(f"API call successful ({latency_ms:.0f}ms)")
+                
+                # Record successful Grok API call
+                mon = _get_monitor()
+                if mon:
+                    mon.metrics.record_grok_call(latency_ms, error=False)
+                    from monitoring import EventType
+                    mon.activity.add_event(
+                        EventType.GROK_CALL,
+                        model=model,
+                        schema=schema.__name__,
+                        latency_ms=round(latency_ms, 1)
+                    )
+                
                 return payload
             except AttributeError:
                 # Fallback for potential API changes in newer versions
@@ -141,7 +171,20 @@ class GrokAdapter:
                 raise
 
         except Exception as e:
+            latency_ms = (time.time() * 1000) - start_time_ms
             logger.error(f"API call failed: {e}", exc_info=True)
+            
+            # Record failed Grok API call
+            mon = _get_monitor()
+            if mon:
+                mon.metrics.record_grok_call(latency_ms, error=True)
+                from monitoring import EventType
+                mon.activity.add_event(
+                    EventType.ERROR,
+                    error=f"Grok API: {str(e)[:100]}",
+                    model=model
+                )
+            
             return None
 
     # ---------------------------------------------------------------------

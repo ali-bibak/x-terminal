@@ -27,8 +27,8 @@ class EventType(str, Enum):
     POLL = "poll"
     TICK_ADDED = "tick_added"
     BAR_GENERATED = "bar_generated"
-    SUMMARY_CACHED = "summary_cached"
-    SUMMARY_CACHE_HIT = "summary_cache_hit"
+    GROK_CALL = "grok_call"
+    X_API_CALL = "x_api_call"
     RATE_LIMIT_WARNING = "rate_limit_warning"
     ERROR = "error"
     TOPIC_ADDED = "topic_added"
@@ -70,10 +70,6 @@ class MetricsCollector:
         self._latencies: Dict[str, List[float]] = {}
         self._error_counts: Dict[str, int] = {}
         
-        # Cache metrics
-        self._cache_hits = 0
-        self._cache_misses = 0
-        
         # Grok API metrics
         self._grok_calls = 0
         self._grok_errors = 0
@@ -102,14 +98,6 @@ class MetricsCollector:
         
         if error:
             self._error_counts[endpoint] = self._error_counts.get(endpoint, 0) + 1
-    
-    def record_cache_hit(self) -> None:
-        """Record a cache hit."""
-        self._cache_hits += 1
-    
-    def record_cache_miss(self) -> None:
-        """Record a cache miss."""
-        self._cache_misses += 1
     
     def record_grok_call(self, latency_ms: float, error: bool = False) -> None:
         """Record a Grok API call."""
@@ -156,10 +144,6 @@ class MetricsCollector:
         """Get all collected metrics."""
         uptime = time.time() - self._start_time
         
-        # Calculate cache hit rate
-        total_cache = self._cache_hits + self._cache_misses
-        cache_hit_rate = self._cache_hits / total_cache if total_cache > 0 else 0
-        
         # Calculate error rates
         grok_error_rate = self._grok_errors / self._grok_calls if self._grok_calls > 0 else 0
         x_api_error_rate = self._x_api_errors / self._x_api_calls if self._x_api_calls > 0 else 0
@@ -172,12 +156,6 @@ class MetricsCollector:
                 "total": sum(self._request_counts.values()),
                 "by_endpoint": self._request_counts,
                 "errors": self._error_counts,
-            },
-            
-            "cache": {
-                "hits": self._cache_hits,
-                "misses": self._cache_misses,
-                "hit_rate": f"{cache_hit_rate:.1%}",
             },
             
             "grok_api": {

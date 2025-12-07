@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
@@ -17,6 +18,19 @@ from dotenv import load_dotenv
 
 from ..models import Tick
 from ..rate_limiter import RateLimiter, RateLimitConfig
+
+# Import monitoring (lazy to avoid circular imports)
+_monitor = None
+
+def _get_monitor():
+    global _monitor
+    if _monitor is None:
+        try:
+            from monitoring import monitor
+            _monitor = monitor
+        except ImportError:
+            _monitor = None
+    return _monitor
 
 load_dotenv()
 
@@ -290,15 +304,26 @@ class XAdapter:
         url = f"{self.BASE_URL}/tweets/search/recent"
         
         try:
+            start_time_ms = time.time() * 1000
             response = requests.get(
                 url,
                 headers=self.headers,
                 params=params,
                 timeout=15
             )
+            latency_ms = (time.time() * 1000) - start_time_ms
             
             # Always update rate limit status from headers (even on errors)
             self._update_rate_limit_status(response)
+            
+            # Record X API call in monitoring
+            mon = _get_monitor()
+            if mon:
+                is_error = response.status_code >= 400
+                mon.metrics.record_x_api_call(latency_ms, error=is_error)
+                if is_error:
+                    from monitoring import EventType
+                    mon.activity.add_event(EventType.ERROR, topic=topic, error=f"X API {response.status_code}")
             
             # Handle specific error codes
             if response.status_code == 401:
@@ -341,6 +366,19 @@ class XAdapter:
                 ticks.append(tick)
             
             logger.info(f"Fetched {len(ticks)} ticks for query '{query}'")
+            
+            # Record successful X API call event
+            mon = _get_monitor()
+            if mon:
+                from monitoring import EventType
+                mon.activity.add_event(
+                    EventType.X_API_CALL, 
+                    topic=topic, 
+                    query=query,
+                    ticks_fetched=len(ticks),
+                    latency_ms=round(latency_ms, 1)
+                )
+            
             return ticks
             
         except requests.exceptions.Timeout:

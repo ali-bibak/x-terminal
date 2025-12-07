@@ -28,6 +28,19 @@ from aggregator import (
     get_polling_window
 )
 
+# Import monitoring (lazy to avoid circular imports)
+_monitor = None
+
+def _get_monitor():
+    global _monitor
+    if _monitor is None:
+        try:
+            from monitoring import monitor
+            _monitor = monitor
+        except ImportError:
+            _monitor = None
+    return _monitor
+
 logger = logging.getLogger(__name__)
 
 
@@ -135,6 +148,19 @@ class TopicManager:
         
         self._topics[topic_id] = topic
         logger.info(f"Added topic: {topic_id} ({label}) with query '{query}' (default resolution: {resolution})")
+        
+        # Record topic added event
+        mon = _get_monitor()
+        if mon:
+            from monitoring import EventType
+            mon.activity.add_event(
+                EventType.TOPIC_ADDED,
+                topic=label,
+                topic_id=topic_id,
+                query=query,
+                resolution=resolution
+            )
+        
         return topic
     
     def remove_topic(self, topic_id: str) -> bool:
@@ -143,11 +169,20 @@ class TopicManager:
         if not topic:
             return False
         
+        label = topic.label
+        
         # Clear ticks for this topic
-        self.tick_store.clear_topic(topic.label)
+        self.tick_store.clear_topic(label)
         del self._topics[topic_id]
         
         logger.info(f"Removed topic: {topic_id}")
+        
+        # Record topic removed event
+        mon = _get_monitor()
+        if mon:
+            from monitoring import EventType
+            mon.activity.add_event(EventType.TOPIC_REMOVED, topic=label, topic_id=topic_id)
+        
         return True
     
     def get_topic(self, topic_id: str) -> Optional[Topic]:
@@ -238,17 +273,49 @@ class TopicManager:
             else:
                 logger.debug(f"Poll {topic_id}: no new ticks")
             
+            # Record poll and tick events
+            mon = _get_monitor()
+            if mon:
+                from monitoring import EventType
+                mon.activity.add_event(
+                    EventType.POLL,
+                    topic=topic.label,
+                    new_ticks=new_count,
+                    total_ticks=topic.tick_count
+                )
+                if new_count > 0:
+                    mon.metrics.record_ticks(new_count)
+                    mon.activity.add_event(
+                        EventType.TICK_ADDED,
+                        topic=topic.label,
+                        count=new_count
+                    )
+            
             return new_count
             
         except XAdapterError as e:
             topic.status = TopicStatus.ERROR
             topic.last_error = str(e)
             logger.error(f"Error polling {topic_id}: {e}")
+            
+            # Record error event
+            mon = _get_monitor()
+            if mon:
+                from monitoring import EventType
+                mon.activity.add_event(EventType.ERROR, topic=topic.label, error=str(e)[:200])
+            
             return 0
         except Exception as e:
             topic.status = TopicStatus.ERROR
             topic.last_error = str(e)
             logger.error(f"Unexpected error polling {topic_id}: {e}")
+            
+            # Record error event
+            mon = _get_monitor()
+            if mon:
+                from monitoring import EventType
+                mon.activity.add_event(EventType.ERROR, topic=topic.label, error=str(e)[:200])
+            
             return 0
     
     def get_bars(

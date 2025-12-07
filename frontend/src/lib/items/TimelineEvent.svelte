@@ -1,23 +1,18 @@
 <script lang="ts">
-  import type { FactCheckStatus } from "$lib/types";
+  import type { BarResponse, FactCheckStatus } from "$lib/types";
   import { formatRelativeTime } from "$lib/utils/time";
   import { Check, X } from "lucide-svelte";
 
   interface Props {
-    timestamp?: string;
-    content: string;
+    content: BarResponse;
     isLast?: boolean;
-    factCheckedByGrok?: FactCheckStatus;
   }
 
-  let {
-    timestamp = new Date().toISOString(),
-    content,
-    isLast = false,
-    factCheckedByGrok = "NOT_CHECKED",
-  }: Props = $props();
+  let { content, isLast = false }: Props = $props();
 
-  let formattedTime = $derived(formatRelativeTime(timestamp));
+  let factCheckedByGrok = "HI";
+
+  let formattedTime = $derived(formatRelativeTime(content.end));
 </script>
 
 <div class="flex gap-x-4">
@@ -32,7 +27,7 @@
 
   <div class="flex-1">
     <p class="text-stone-400 text-sm mb-1">{formattedTime}</p>
-    <p>{content}</p>
+    <p>{content.summary}</p>
     {#if factCheckedByGrok === "FALSE"}
       <div class="text-red-400 text-sm mb-1 flex flex-row items-center">
         <X class="h-4" />

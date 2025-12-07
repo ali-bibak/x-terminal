@@ -1,6 +1,6 @@
 <script lang="ts">
   import "./layout.css";
-  import favicon from "$lib/assets/favicon.svg";
+  import favicon from "$lib/assets/favicon.ico";
   import Header from "$lib/nav/Header.svelte";
 
   let { children } = $props();
@@ -8,6 +8,7 @@
 
 <svelte:head>
   <link rel="icon" href={favicon} />
+  <title>X Terminal</title>
 </svelte:head>
 
 <div class="h-full flex flex-col">

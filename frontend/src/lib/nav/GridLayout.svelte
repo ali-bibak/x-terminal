@@ -148,9 +148,9 @@
           );
         }
         if (resizeDirection.includes("w")) {
-          const tempX = snapToGrid(startPanelX + deltaX);
-          const tempWidth = snapToGrid(startWidth - deltaX);
-          if (tempWidth >= cellSize && tempX >= 0) {
+          const tempX = Math.max(0, snapToGrid(startPanelX + deltaX));
+          const tempWidth = snapToGrid(startPanelX + startWidth - tempX);
+          if (tempWidth >= cellSize) {
             newX = tempX;
             newWidth = tempWidth;
           }
@@ -211,7 +211,7 @@
       hover:bg-stone-800 flex flex-row items-center gap-x-2 border border-stone-800"
       title="Add Panel"
     >
-      <Plus size={18} /> Add a Panel
+      <Plus size={18} /> Add a Terminal
     </button>
   {/if}
 

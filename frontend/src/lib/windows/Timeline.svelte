@@ -1,6 +1,7 @@
 <script lang="ts">
   import LiveBadge from "$lib/items/LiveBadge.svelte";
   import SentimentTracker from "$lib/items/SentimentTracker.svelte";
+  import TimelineEvent from "$lib/items/TimelineEvent.svelte";
   import { ArrowLeft, Bookmark, Ellipsis, Share } from "lucide-svelte";
 
   interface Props {
@@ -81,28 +82,12 @@
 
 <div class="flex flex-col py-2">
   {#each Array(5) as _, i}
-    <div class="flex gap-x-4">
-      <div class="flex flex-col items-center">
-        <div class="w-2 h-2 rounded-full bg-white mt-2"></div>
-        {#if i < 4}
-          <div class="w-0.5 bg-stone-700 flex-1 min-h-16"></div>
-        {/if}
-      </div>
-
-      <div class="flex-1 pb-8">
-        <p class="text-stone-400 text-sm mb-1">Just now</p>
-        <p>Timeline event {i + 1} for {title}</p>
-      </div>
-    </div>
+    <TimelineEvent
+      content="Timeline event {i + 1} for {title}"
+      isLast={i === 4}
+    />
   {/each}
-  <div class="flex gap-x-4">
-    <div class="flex flex-col items-center">
-      <div class="w-2 h-2 rounded-full bg-white mt-2"></div>
-    </div>
-    <div class="flex-1 pb-8">
-      <p class="text-stone-400 text-sm mb-1">Notable Tweet</p>
-    </div>
-  </div>
+  <TimelineEvent timestamp="Notable Tweet" content="" isLast={true} />
 </div>
 
 <style>

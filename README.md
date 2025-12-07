@@ -215,9 +215,12 @@ npm run dev
 | Resolution | Use Case |
 |------------|----------|
 | `15s` | Live demo / real-time monitoring |
+| `30s` | High-frequency tracking |
 | `1m` | Active topic tracking |
 | `5m` | Standard monitoring |
-| `1h` | Daily summaries |
+| `15m` | Quarter-hour snapshots |
+| `30m` | Half-hour summaries |
+| `1h` | Hourly digests |
 
 ---
 

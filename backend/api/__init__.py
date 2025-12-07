@@ -11,7 +11,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
 
-from core import TopicManager, Topic, TopicStatus, TickPoller
+from core import TopicManager, Topic, TopicStatus, TickPoller, RESOLUTION_MAP, DEFAULT_RESOLUTION
 from aggregator import Bar, DigestService
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ class CreateTopicRequest(BaseModel):
     """Request to create a new topic."""
     label: str = Field(description="Display label (e.g., '$TSLA')")
     query: str = Field(description="X search query")
-    resolution: str = Field(default="5m", description="Bar resolution")
+    resolution: str = Field(default=DEFAULT_RESOLUTION, description="Default display resolution (bars generated on-demand)")
 
 
 class TopicResponse(BaseModel):
@@ -121,7 +121,8 @@ class PollResponse(BaseModel):
     """Response after triggering a poll."""
     success: bool
     message: str
-    bar: Optional[BarResponse] = None
+    new_ticks: int = 0
+    total_ticks: int = 0
 
 
 # ============================================================================
@@ -261,6 +262,54 @@ async def resume_topic(
     return TopicResponse.from_topic(topic)
 
 
+class SetResolutionRequest(BaseModel):
+    """Request to change default resolution."""
+    resolution: str = Field(description=f"New default resolution. Options: {list(RESOLUTION_MAP.keys())}")
+
+
+@router.patch("/topics/{topic_id}/resolution", response_model=TopicResponse)
+async def set_topic_resolution(
+    topic_id: str,
+    request: SetResolutionRequest,
+    manager: TopicManager = Depends(get_topic_manager)
+):
+    """
+    Change the default display resolution for a topic.
+    
+    This only changes the default - you can always query bars at any resolution
+    using the ?resolution= query parameter.
+    """
+    if request.resolution not in RESOLUTION_MAP:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid resolution: {request.resolution}. Valid options: {list(RESOLUTION_MAP.keys())}"
+        )
+    
+    if not manager.set_topic_resolution(topic_id, request.resolution):
+        raise HTTPException(status_code=404, detail=f"Topic '{topic_id}' not found")
+    
+    topic = manager.get_topic(topic_id)
+    return TopicResponse.from_topic(topic)
+
+
+# ----------------------------------------------------------------------------
+# Resolutions
+# ----------------------------------------------------------------------------
+
+@router.get("/resolutions")
+async def list_resolutions():
+    """
+    List all available bar resolutions.
+    
+    Bars can be generated on-demand at any of these resolutions.
+    """
+    return {
+        "resolutions": list(RESOLUTION_MAP.keys()),
+        "default": DEFAULT_RESOLUTION,
+        "details": {k: f"{v} seconds" for k, v in RESOLUTION_MAP.items()}
+    }
+
+
 # ----------------------------------------------------------------------------
 # Bars
 # ----------------------------------------------------------------------------
@@ -269,33 +318,53 @@ async def resume_topic(
 async def get_bars(
     topic_id: str,
     limit: int = Query(default=50, ge=1, le=500, description="Number of bars to return"),
-    resolution: Optional[str] = Query(default=None, description="Filter by resolution"),
+    resolution: Optional[str] = Query(default=None, description=f"Display resolution. Options: {list(RESOLUTION_MAP.keys())}"),
+    generate_summaries: bool = Query(default=True, description="Generate Grok summaries for bars"),
     manager: TopicManager = Depends(get_topic_manager)
 ):
     """
-    Get bar timeline for a topic.
+    Get bar timeline for a topic at any resolution.
     
-    Returns bars sorted by time (most recent first).
+    Bars are generated ON-DEMAND from raw ticks at the specified resolution.
+    Each bar gets its own fresh Grok summary from the underlying ticks.
+    
+    This allows instant switching between resolutions (15s, 1m, 5m, etc.)
+    without losing data quality.
     """
     topic = manager.get_topic(topic_id)
     if not topic:
         raise HTTPException(status_code=404, detail=f"Topic '{topic_id}' not found")
     
-    bars = manager.get_bars(topic_id, limit=limit, resolution=resolution)
+    # Validate resolution
+    if resolution and resolution not in RESOLUTION_MAP:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid resolution: {resolution}. Valid options: {list(RESOLUTION_MAP.keys())}"
+        )
+    
+    bars = manager.get_bars(topic_id, limit=limit, resolution=resolution, generate_summaries=generate_summaries)
     return [BarResponse.from_bar(b) for b in bars]
 
 
 @router.get("/topics/{topic_id}/bars/latest", response_model=Optional[BarResponse])
 async def get_latest_bar(
     topic_id: str,
+    resolution: Optional[str] = Query(default=None, description="Display resolution"),
+    generate_summary: bool = Query(default=True, description="Generate Grok summary"),
     manager: TopicManager = Depends(get_topic_manager)
 ):
-    """Get the most recent bar for a topic."""
+    """Get the most recent bar for a topic at the specified resolution."""
     topic = manager.get_topic(topic_id)
     if not topic:
         raise HTTPException(status_code=404, detail=f"Topic '{topic_id}' not found")
     
-    bar = manager.get_latest_bar(topic_id)
+    if resolution and resolution not in RESOLUTION_MAP:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid resolution: {resolution}. Valid options: {list(RESOLUTION_MAP.keys())}"
+        )
+    
+    bar = manager.get_latest_bar(topic_id, resolution=resolution, generate_summary=generate_summary)
     if not bar:
         return None
     return BarResponse.from_bar(bar)
@@ -313,26 +382,23 @@ async def poll_topic(
     """
     Manually trigger a poll for a topic.
     
-    Creates a bar for the previous time window.
+    Fetches new ticks from X API and stores them.
+    Bars are generated on-demand via GET /topics/{id}/bars?resolution=...
     """
     topic = manager.get_topic(topic_id)
     if not topic:
         raise HTTPException(status_code=404, detail=f"Topic '{topic_id}' not found")
     
     try:
-        bar = await manager.poll_topic(topic_id, generate_summary=True)
+        new_ticks = await manager.poll_topic(topic_id)
+        total_ticks = manager.get_tick_count(topic_id)
         
-        if bar:
-            return PollResponse(
-                success=True,
-                message=f"Created bar with {bar.post_count} posts",
-                bar=BarResponse.from_bar(bar)
-            )
-        else:
-            return PollResponse(
-                success=True,
-                message="No new data for this window"
-            )
+        return PollResponse(
+            success=True,
+            message=f"Added {new_ticks} new ticks" if new_ticks > 0 else "No new ticks",
+            new_ticks=new_ticks,
+            total_ticks=total_ticks
+        )
     except Exception as e:
         return PollResponse(
             success=False,

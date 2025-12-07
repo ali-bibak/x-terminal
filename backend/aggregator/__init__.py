@@ -1,12 +1,16 @@
 """
 Aggregator module for X Terminal.
-Contains BarAggregator for tick-to-bar aggregation and DigestService for creating topic digests.
 
-Designed for polling-based usage:
-1. External poller fetches ticks for a time window
-2. Passes ticks to BarAggregator.create_bar()
-3. BarAggregator stores bar and generates summary via GrokAdapter
-4. DigestService creates digests from stored bars
+Architecture:
+- Raw ticks are stored per topic
+- Bars are generated ON-DEMAND at any resolution
+- Each bar gets its own fresh Grok summary from the raw ticks
+- Resolution is a query parameter, not a storage attribute
+
+This allows:
+- Instant switching between resolutions (15s, 1m, 5m, etc.)
+- High-quality summaries (always from raw data, never aggregated summaries)
+- Flexible demo experience
 """
 
 from __future__ import annotations
@@ -24,24 +28,32 @@ from adapter.models import Tick
 logger = logging.getLogger(__name__)
 
 
+# Minimum resolution (15s) - respects X API constraint (10s buffer)
+# All resolutions must be multiples of this for clean aggregation
+MIN_RESOLUTION_SECONDS = 15
+
 # Resolution constants (in seconds)
 RESOLUTION_MAP = {
-    "1m": 60,
-    "5m": 300,
-    "10m": 600,
-    "15m": 900,
-    "30m": 1800,
-    "1h": 3600,
+    "15s": 15,      # Minimum - 4 per minute
+    "30s": 30,      # 2 per minute
+    "1m": 60,       # 1 per minute
+    "5m": 300,      # 1 per 5 minutes
+    "15m": 900,     # 1 per 15 minutes
+    "30m": 1800,    # 1 per 30 minutes
+    "1h": 3600,     # 1 per hour
 }
+
+# Default resolution for display
+DEFAULT_RESOLUTION = "1m"
 
 
 class Bar(BaseModel):
     """
     A time-bucketed aggregate for a single topic.
-    Contains aggregated metrics and an LLM summary.
+    Generated on-demand from raw ticks.
     """
     topic: str = Field(description="Topic this bar belongs to")
-    resolution: str = Field(description="Time resolution (e.g., '5m')")
+    resolution: str = Field(description="Time resolution (e.g., '1m')")
     start: datetime = Field(description="Start of the time window")
     end: datetime = Field(description="End of the time window")
     post_count: int = Field(default=0, description="Number of posts in this bar")
@@ -55,7 +67,7 @@ class Bar(BaseModel):
     # Sample posts (stored as tick IDs)
     sample_post_ids: List[str] = Field(default_factory=list, description="IDs of sample posts")
     
-    # LLM-generated summary
+    # LLM-generated summary (fresh from ticks, not aggregated)
     summary: Optional[BarSummary] = Field(default=None, description="Grok-generated bar summary")
 
     def to_dict(self) -> Dict[str, Any]:
@@ -78,61 +90,150 @@ class Bar(BaseModel):
         }
 
 
-class BarAggregator:
+class TickStore:
     """
-    Simple polling-based bar aggregator.
+    In-memory storage for raw ticks per topic.
     
-    Usage:
-        aggregator = BarAggregator(grok_adapter)
-        
-        # At each bar close, fetch ticks and create bar
-        ticks = fetch_ticks_for_window(topic, start, end)
-        bar = aggregator.create_bar(topic, ticks, start, end)
-        
-        # Later, get bars for display
-        bars = aggregator.get_bars(topic, limit=12)
+    Ticks are the source of truth - bars are generated on-demand.
     """
-
-    def __init__(self, grok_adapter: GrokAdapter, default_resolution: str = "5m"):
+    
+    def __init__(self, max_ticks_per_topic: int = 10000):
         """
-        Initialize the BarAggregator.
+        Initialize the TickStore.
         
         Args:
-            grok_adapter: GrokAdapter for generating bar summaries
-            default_resolution: Default time resolution for bars
+            max_ticks_per_topic: Maximum ticks to keep per topic (older ones pruned)
         """
-        self.grok_adapter = grok_adapter
-        self.default_resolution = default_resolution
-        
-        # In-memory storage: {topic: [Bar, Bar, ...]}
-        self._bars: Dict[str, List[Bar]] = defaultdict(list)
-
-    def create_bar(
-        self,
-        topic: str,
-        ticks: List[Tick],
-        start: datetime,
-        end: datetime,
-        resolution: Optional[str] = None,
-        generate_summary: bool = True
-    ) -> Bar:
+        self.max_ticks_per_topic = max_ticks_per_topic
+        self._ticks: Dict[str, List[Tick]] = defaultdict(list)
+        self._tick_ids: Dict[str, set] = defaultdict(set)  # For deduplication
+    
+    def add_ticks(self, topic: str, ticks: List[Tick]) -> int:
         """
-        Create a bar from ticks for a specific time window.
+        Add ticks for a topic (with deduplication).
         
         Args:
             topic: Topic name
-            ticks: List of ticks in this time window
-            start: Start of the time window
-            end: End of the time window
-            resolution: Time resolution (e.g., "5m")
+            ticks: List of ticks to add
+        
+        Returns:
+            Number of new ticks added (excluding duplicates)
+        """
+        added = 0
+        for tick in ticks:
+            if tick.id not in self._tick_ids[topic]:
+                self._ticks[topic].append(tick)
+                self._tick_ids[topic].add(tick.id)
+                added += 1
+        
+        # Prune old ticks if over limit
+        if len(self._ticks[topic]) > self.max_ticks_per_topic:
+            # Sort by timestamp and keep most recent
+            self._ticks[topic] = sorted(
+                self._ticks[topic], 
+                key=lambda t: t.timestamp, 
+                reverse=True
+            )[:self.max_ticks_per_topic]
+            # Update ID set
+            self._tick_ids[topic] = {t.id for t in self._ticks[topic]}
+        
+        return added
+    
+    def get_ticks(
+        self, 
+        topic: str, 
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None
+    ) -> List[Tick]:
+        """
+        Get ticks for a topic, optionally filtered by time range.
+        
+        Args:
+            topic: Topic name
+            start: Start time (inclusive)
+            end: End time (exclusive)
+        
+        Returns:
+            List of ticks sorted by timestamp (oldest first)
+        """
+        ticks = self._ticks.get(topic, [])
+        
+        if start or end:
+            filtered = []
+            for tick in ticks:
+                if start and tick.timestamp < start:
+                    continue
+                if end and tick.timestamp >= end:
+                    continue
+                filtered.append(tick)
+            ticks = filtered
+        
+        return sorted(ticks, key=lambda t: t.timestamp)
+    
+    def get_tick_count(self, topic: str) -> int:
+        """Get total tick count for a topic."""
+        return len(self._ticks.get(topic, []))
+    
+    def get_time_range(self, topic: str) -> Optional[tuple[datetime, datetime]]:
+        """Get the time range of stored ticks for a topic."""
+        ticks = self._ticks.get(topic, [])
+        if not ticks:
+            return None
+        
+        sorted_ticks = sorted(ticks, key=lambda t: t.timestamp)
+        return (sorted_ticks[0].timestamp, sorted_ticks[-1].timestamp)
+    
+    def clear_topic(self, topic: str) -> None:
+        """Remove all ticks for a topic."""
+        if topic in self._ticks:
+            del self._ticks[topic]
+        if topic in self._tick_ids:
+            del self._tick_ids[topic]
+
+
+class BarGenerator:
+    """
+    Generates bars on-demand from raw ticks.
+    
+    Each bar gets its own fresh Grok summary from the ticks in that window.
+    """
+    
+    def __init__(self, grok_adapter: GrokAdapter, tick_store: TickStore):
+        """
+        Initialize the BarGenerator.
+        
+        Args:
+            grok_adapter: GrokAdapter for generating summaries
+            tick_store: TickStore containing raw ticks
+        """
+        self.grok_adapter = grok_adapter
+        self.tick_store = tick_store
+    
+    def generate_bar(
+        self,
+        topic: str,
+        start: datetime,
+        end: datetime,
+        resolution: str,
+        generate_summary: bool = True
+    ) -> Bar:
+        """
+        Generate a single bar from ticks in the given time window.
+        
+        Args:
+            topic: Topic name
+            start: Bar start time
+            end: Bar end time
+            resolution: Resolution label (e.g., "1m")
             generate_summary: Whether to generate Grok summary
         
         Returns:
-            The created Bar with summary
+            Bar with metrics and optional summary
         """
-        resolution = resolution or self.default_resolution
+        # Get ticks in this window
+        ticks = self.tick_store.get_ticks(topic, start=start, end=end)
         
-        # Aggregate metrics from ticks
+        # Aggregate metrics
         total_likes = sum(t.metrics.get("like_count", 0) for t in ticks)
         total_retweets = sum(t.metrics.get("retweet_count", 0) for t in ticks)
         total_replies = sum(t.metrics.get("reply_count", 0) for t in ticks)
@@ -155,7 +256,7 @@ class BarAggregator:
             sample_post_ids=sample_post_ids,
         )
         
-        # Generate summary if requested and we have ticks
+        # Generate fresh summary from ticks
         if generate_summary and ticks:
             try:
                 bar.summary = self.grok_adapter.summarize_bar(
@@ -164,63 +265,69 @@ class BarAggregator:
                     start_time=start,
                     end_time=end
                 )
-                logger.info(f"Created bar for {topic} [{start} - {end}] with {len(ticks)} posts")
             except Exception as e:
                 logger.error(f"Failed to generate bar summary: {e}")
-        else:
-            logger.info(f"Created empty bar for {topic} [{start} - {end}]")
-        
-        # Store bar
-        self._bars[topic].append(bar)
         
         return bar
-
-    def get_bars(self, topic: str, limit: int = 50) -> List[Bar]:
+    
+    def generate_bars(
+        self,
+        topic: str,
+        resolution: str = DEFAULT_RESOLUTION,
+        limit: int = 50,
+        generate_summaries: bool = True,
+        end_time: Optional[datetime] = None
+    ) -> List[Bar]:
         """
-        Get bars for a topic, sorted by start time (most recent first).
+        Generate multiple bars at the specified resolution.
         
         Args:
             topic: Topic name
-            limit: Maximum number of bars to return
+            resolution: Time resolution (e.g., "15s", "1m", "5m")
+            limit: Maximum number of bars to generate
+            generate_summaries: Whether to generate Grok summaries
+            end_time: End time for the most recent bar (default: now)
         
         Returns:
-            List of bars sorted by start time (descending)
+            List of bars, most recent first
         """
-        if topic not in self._bars:
-            return []
+        if resolution not in RESOLUTION_MAP:
+            raise ValueError(f"Invalid resolution: {resolution}. Valid: {list(RESOLUTION_MAP.keys())}")
         
-        # Sort by start time descending (most recent first)
-        bars = sorted(self._bars[topic], key=lambda b: b.start, reverse=True)
-        return bars[:limit]
-
-    def get_latest_bar(self, topic: str) -> Optional[Bar]:
-        """Get the most recent bar for a topic."""
-        bars = self.get_bars(topic, limit=1)
-        return bars[0] if bars else None
-
-    def clear_topic(self, topic: str) -> None:
-        """Remove all bars for a topic."""
-        if topic in self._bars:
-            del self._bars[topic]
-
-    def clear_old_bars(self, max_bars_per_topic: int = 100) -> None:
-        """Keep only the most recent bars per topic."""
-        for topic in self._bars:
-            if len(self._bars[topic]) > max_bars_per_topic:
-                # Sort by start time descending and keep the most recent
-                self._bars[topic] = sorted(
-                    self._bars[topic],
-                    key=lambda b: b.start,
-                    reverse=True
-                )[:max_bars_per_topic]
+        resolution_seconds = RESOLUTION_MAP[resolution]
+        
+        # Determine time range
+        if end_time is None:
+            end_time = datetime.now(timezone.utc)
+        
+        # Floor end_time to resolution boundary
+        ts = end_time.timestamp()
+        bar_end_ts = int(ts // resolution_seconds) * resolution_seconds
+        bar_end = datetime.fromtimestamp(bar_end_ts, tz=timezone.utc)
+        
+        # Generate bars going backwards
+        bars = []
+        for i in range(limit):
+            bar_start = bar_end - timedelta(seconds=resolution_seconds)
+            
+            bar = self.generate_bar(
+                topic=topic,
+                start=bar_start,
+                end=bar_end,
+                resolution=resolution,
+                generate_summary=generate_summaries
+            )
+            bars.append(bar)
+            
+            # Move to previous bar
+            bar_end = bar_start
+        
+        return bars  # Already most recent first
 
 
 class DigestService:
     """
-    Service for creating topic digests from aggregated bars.
-    
-    Note: This service doesn't store bars itself. Bars should be passed
-    directly to create_digest() or fetched from TopicManager.
+    Service for creating topic digests from bars.
     """
 
     def __init__(self, grok_adapter: GrokAdapter):
@@ -283,15 +390,19 @@ class DigestService:
             raise RuntimeError(f"Failed to generate digest for {topic}: {e}") from e
 
 
-def get_bar_window(resolution: str = "5m") -> tuple[datetime, datetime]:
+def get_bar_boundaries(resolution: str, reference_time: Optional[datetime] = None) -> tuple[datetime, datetime]:
     """
-    Get the current bar window boundaries based on resolution.
+    Get the bar boundaries containing the reference time.
+    
+    Args:
+        resolution: Time resolution (e.g., "15s", "1m")
+        reference_time: Reference time (default: now)
     
     Returns:
-        Tuple of (bar_start, bar_end) for the current window
+        Tuple of (bar_start, bar_end)
     """
-    resolution_seconds = RESOLUTION_MAP.get(resolution, 300)
-    now = datetime.now(timezone.utc)
+    resolution_seconds = RESOLUTION_MAP.get(resolution, 60)
+    now = reference_time or datetime.now(timezone.utc)
     
     # Floor to resolution boundary
     ts = now.timestamp()
@@ -303,28 +414,35 @@ def get_bar_window(resolution: str = "5m") -> tuple[datetime, datetime]:
     return bar_start, bar_end
 
 
-def get_previous_bar_window(resolution: str = "5m") -> tuple[datetime, datetime]:
+def get_polling_window(min_age_seconds: int = 15) -> tuple[datetime, datetime]:
     """
-    Get the previous (completed) bar window boundaries.
+    Get a time window for polling that's safe for X API.
+    
+    X API requires end_time to be at least 10 seconds before now.
+    This returns a window ending at least min_age_seconds ago.
+    
+    Args:
+        min_age_seconds: Minimum age for end_time (default: 15s)
     
     Returns:
-        Tuple of (bar_start, bar_end) for the previous window
+        Tuple of (start, end) for polling
     """
-    resolution_seconds = RESOLUTION_MAP.get(resolution, 300)
-    bar_start, bar_end = get_bar_window(resolution)
+    now = datetime.now(timezone.utc)
+    end = now - timedelta(seconds=min_age_seconds)
+    start = end - timedelta(seconds=MIN_RESOLUTION_SECONDS)
     
-    prev_start = bar_start - timedelta(seconds=resolution_seconds)
-    prev_end = bar_start
-    
-    return prev_start, prev_end
+    return start, end
 
 
 __all__ = [
     "Bar",
-    "BarAggregator",
+    "TickStore",
+    "BarGenerator",
     "DigestService",
     "RESOLUTION_MAP",
+    "DEFAULT_RESOLUTION",
+    "MIN_RESOLUTION_SECONDS",
     "Tick",  # Re-exported from adapter.models
-    "get_bar_window",
-    "get_previous_bar_window",
+    "get_bar_boundaries",
+    "get_polling_window",
 ]

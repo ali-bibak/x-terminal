@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from adapter.grok import GrokAdapter
 from adapter.rate_limiter import RateLimiter
 from adapter.x import XAdapter
-from aggregator import DigestService
+from aggregator import DigestService, MIN_RESOLUTION_SECONDS, DEFAULT_RESOLUTION
 from api import router, set_dependencies
 from core import TickPoller, TopicManager
 from database import init_db
@@ -69,19 +69,25 @@ async def lifespan(app: FastAPI):
         logger.warning("⚠ Grok Adapter not live - set XAI_API_KEY")
 
     # Initialize core services
+    # TopicManager stores raw ticks, bars are generated on-demand
     topic_manager = TopicManager(
-        x_adapter=x_adapter, grok_adapter=grok_adapter, default_resolution="5m"
+        x_adapter=x_adapter, 
+        grok_adapter=grok_adapter, 
+        default_resolution=DEFAULT_RESOLUTION  # Default display resolution
     )
 
-    # Initialize digest service (gets bars from topic_manager when needed)
+    # Initialize digest service
     digest_service = DigestService(grok_adapter=grok_adapter)
 
-    # Initialize poller (polls every 5 minutes by default)
-    poll_interval = int(os.environ.get("POLL_INTERVAL", "300"))
+    # Initialize poller
+    # Default: polls at minimum resolution (15s) for granular tick collection
+    # Bars are generated on-demand at any resolution
+    poll_interval_env = os.environ.get("POLL_INTERVAL")
+    poll_interval = int(poll_interval_env) if poll_interval_env else MIN_RESOLUTION_SECONDS
+    
     tick_poller = TickPoller(
         topic_manager=topic_manager,
         poll_interval=poll_interval,
-        generate_summaries=True,
     )
 
     # Set dependencies for API routes
@@ -92,6 +98,7 @@ async def lifespan(app: FastAPI):
     if auto_poll:
         await tick_poller.start()
         logger.info(f"✓ Background poller started (interval: {poll_interval}s)")
+        logger.info(f"  Bars generated on-demand at any resolution: 15s, 30s, 1m, 5m, ...")
     else:
         logger.info("ℹ Background poller disabled (set AUTO_POLL=true to enable)")
 

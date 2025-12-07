@@ -2,6 +2,11 @@
 Core services for X Terminal backend.
 - TopicManager: Manages watched topics and their state
 - TickPoller: Background service for polling X API
+
+Architecture:
+- Raw ticks are stored (not bars)
+- Bars are generated on-demand at any resolution
+- Resolution is a query parameter
 """
 
 from __future__ import annotations
@@ -9,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional
 from enum import Enum
 
 from pydantic import BaseModel, Field
@@ -17,7 +22,11 @@ from pydantic import BaseModel, Field
 from adapter.x import XAdapter, XAdapterError
 from adapter.grok import GrokAdapter
 from adapter.models import Tick
-from aggregator import BarAggregator, Bar, get_previous_bar_window, RESOLUTION_MAP
+from aggregator import (
+    TickStore, BarGenerator, Bar, 
+    RESOLUTION_MAP, DEFAULT_RESOLUTION, MIN_RESOLUTION_SECONDS,
+    get_polling_window
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +39,16 @@ class TopicStatus(str, Enum):
 
 
 class Topic(BaseModel):
-    """A watched topic configuration."""
+    """
+    A watched topic configuration.
+    
+    Note: resolution is the DEFAULT display resolution.
+    Bars can be generated at any resolution via query parameter.
+    """
     id: str = Field(description="Unique topic ID")
     label: str = Field(description="Display label (e.g., '$TSLA')")
     query: str = Field(description="X search query")
-    resolution: str = Field(default="5m", description="Bar resolution")
+    resolution: str = Field(default=DEFAULT_RESOLUTION, description="Default display resolution")
     status: TopicStatus = Field(default=TopicStatus.ACTIVE)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_poll: Optional[datetime] = Field(default=None)
@@ -45,34 +59,46 @@ class Topic(BaseModel):
 
 class TopicManager:
     """
-    Manages watched topics and their associated bars.
+    Manages watched topics and their tick data.
+    
+    Architecture:
+    - Stores raw ticks (not pre-computed bars)
+    - Generates bars on-demand at any resolution
+    - Resolution is a query-time parameter
     
     Usage:
         manager = TopicManager(x_adapter, grok_adapter)
         
-        # Add a topic to watch
+        # Add a topic
         topic = manager.add_topic("tsla", "$TSLA", "$TSLA OR Tesla")
         
-        # Poll for new ticks and create bars
+        # Poll for new ticks (stores raw ticks)
         await manager.poll_topic("tsla")
         
-        # Get bars for a topic
-        bars = manager.get_bars("tsla", limit=50)
+        # Get bars at ANY resolution (generated on-demand)
+        bars_15s = manager.get_bars("tsla", resolution="15s")
+        bars_1m = manager.get_bars("tsla", resolution="1m")
+        bars_5m = manager.get_bars("tsla", resolution="5m")
     """
     
     def __init__(
         self,
         x_adapter: XAdapter,
         grok_adapter: GrokAdapter,
-        default_resolution: str = "5m"
+        default_resolution: str = DEFAULT_RESOLUTION
     ):
         self.x_adapter = x_adapter
         self.grok_adapter = grok_adapter
         self.default_resolution = default_resolution
         
-        # In-memory stores
+        # Shared tick store for all topics
+        self.tick_store = TickStore()
+        
+        # Bar generator (uses tick store)
+        self.bar_generator = BarGenerator(grok_adapter, self.tick_store)
+        
+        # Topic configurations
         self._topics: Dict[str, Topic] = {}
-        self._aggregators: Dict[str, BarAggregator] = {}
     
     def add_topic(
         self,
@@ -88,7 +114,7 @@ class TopicManager:
             topic_id: Unique identifier
             label: Display label
             query: X search query
-            resolution: Bar resolution (default: 5m)
+            resolution: Default display resolution (bars generated on-demand)
         
         Returns:
             The created Topic
@@ -98,7 +124,7 @@ class TopicManager:
         
         resolution = resolution or self.default_resolution
         if resolution not in RESOLUTION_MAP:
-            raise ValueError(f"Invalid resolution: {resolution}")
+            raise ValueError(f"Invalid resolution: {resolution}. Valid: {list(RESOLUTION_MAP.keys())}")
         
         topic = Topic(
             id=topic_id,
@@ -108,22 +134,18 @@ class TopicManager:
         )
         
         self._topics[topic_id] = topic
-        self._aggregators[topic_id] = BarAggregator(
-            grok_adapter=self.grok_adapter,
-            default_resolution=resolution
-        )
-        
-        logger.info(f"Added topic: {topic_id} ({label}) with query '{query}'")
+        logger.info(f"Added topic: {topic_id} ({label}) with query '{query}' (default resolution: {resolution})")
         return topic
     
     def remove_topic(self, topic_id: str) -> bool:
         """Remove a topic from watching."""
-        if topic_id not in self._topics:
+        topic = self._topics.get(topic_id)
+        if not topic:
             return False
         
+        # Clear ticks for this topic
+        self.tick_store.clear_topic(topic.label)
         del self._topics[topic_id]
-        if topic_id in self._aggregators:
-            del self._aggregators[topic_id]
         
         logger.info(f"Removed topic: {topic_id}")
         return True
@@ -153,33 +175,44 @@ class TopicManager:
         topic.last_error = None
         return True
     
-    async def poll_topic(self, topic_id: str, generate_summary: bool = True) -> Optional[Bar]:
+    def set_topic_resolution(self, topic_id: str, resolution: str) -> bool:
         """
-        Poll X API for a topic and create a bar for the previous window.
+        Change the default display resolution for a topic.
+        
+        This doesn't affect stored data - just changes the default
+        resolution used when querying bars.
+        """
+        if resolution not in RESOLUTION_MAP:
+            raise ValueError(f"Invalid resolution: {resolution}")
+        
+        topic = self._topics.get(topic_id)
+        if not topic:
+            return False
+        
+        topic.resolution = resolution
+        return True
+    
+    async def poll_topic(self, topic_id: str) -> int:
+        """
+        Poll X API for a topic and store raw ticks.
         
         Args:
             topic_id: Topic to poll
-            generate_summary: Whether to generate Grok summary
         
         Returns:
-            The created Bar, or None if no ticks found
+            Number of new ticks added
         """
         topic = self._topics.get(topic_id)
         if not topic:
             logger.warning(f"Topic not found: {topic_id}")
-            return None
+            return 0
         
         if topic.status != TopicStatus.ACTIVE:
             logger.debug(f"Topic {topic_id} is not active, skipping poll")
-            return None
+            return 0
         
-        aggregator = self._aggregators.get(topic_id)
-        if not aggregator:
-            logger.error(f"No aggregator for topic: {topic_id}")
-            return None
-        
-        # Get the previous bar window
-        start_time, end_time = get_previous_bar_window(topic.resolution)
+        # Get a safe polling window (respects X API constraints)
+        start_time, end_time = get_polling_window(min_age_seconds=15)
         
         try:
             # Fetch ticks from X API
@@ -191,105 +224,111 @@ class TopicManager:
                 max_results=100
             )
             
+            # Store raw ticks
+            new_count = self.tick_store.add_ticks(topic.label, ticks)
+            
             # Update topic stats
             topic.last_poll = datetime.now(timezone.utc)
             topic.poll_count += 1
-            topic.tick_count += len(ticks)
+            topic.tick_count = self.tick_store.get_tick_count(topic.label)
             topic.last_error = None
             
-            if not ticks:
-                logger.info(f"No ticks for {topic_id} in window {start_time} - {end_time}")
-                # Still create an empty bar to show there was no activity
-                bar = aggregator.create_bar(
-                    topic=topic.label,
-                    ticks=[],
-                    start=start_time,
-                    end=end_time,
-                    resolution=topic.resolution,
-                    generate_summary=False
-                )
-                return bar
+            if new_count > 0:
+                logger.info(f"Poll {topic_id}: +{new_count} ticks ({start_time.strftime('%H:%M:%S')} - {end_time.strftime('%H:%M:%S')})")
+            else:
+                logger.debug(f"Poll {topic_id}: no new ticks")
             
-            # Create bar with ticks
-            bar = aggregator.create_bar(
-                topic=topic.label,
-                ticks=ticks,
-                start=start_time,
-                end=end_time,
-                resolution=topic.resolution,
-                generate_summary=generate_summary
-            )
-            
-            logger.info(f"Created bar for {topic_id}: {len(ticks)} ticks, {start_time} - {end_time}")
-            return bar
+            return new_count
             
         except XAdapterError as e:
             topic.status = TopicStatus.ERROR
             topic.last_error = str(e)
             logger.error(f"Error polling {topic_id}: {e}")
-            return None
+            return 0
         except Exception as e:
             topic.status = TopicStatus.ERROR
             topic.last_error = str(e)
             logger.error(f"Unexpected error polling {topic_id}: {e}")
-            return None
+            return 0
     
     def get_bars(
         self,
         topic_id: str,
+        resolution: Optional[str] = None,
         limit: int = 50,
-        resolution: Optional[str] = None
+        generate_summaries: bool = True
     ) -> List[Bar]:
         """
-        Get bars for a topic.
+        Get bars for a topic at the specified resolution.
+        
+        Bars are generated ON-DEMAND from raw ticks.
+        Each bar gets its own fresh Grok summary.
         
         Args:
             topic_id: Topic ID
+            resolution: Display resolution (default: topic's default)
             limit: Maximum bars to return
-            resolution: Filter by resolution (optional)
+            generate_summaries: Whether to generate Grok summaries
         
         Returns:
             List of bars, most recent first
         """
-        aggregator = self._aggregators.get(topic_id)
-        if not aggregator:
-            return []
-        
         topic = self._topics.get(topic_id)
         if not topic:
             return []
         
-        return aggregator.get_bars(topic.label, limit=limit)
+        # Use topic's default resolution if not specified
+        resolution = resolution or topic.resolution
+        
+        if resolution not in RESOLUTION_MAP:
+            raise ValueError(f"Invalid resolution: {resolution}")
+        
+        # Generate bars on-demand from stored ticks
+        return self.bar_generator.generate_bars(
+            topic=topic.label,
+            resolution=resolution,
+            limit=limit,
+            generate_summaries=generate_summaries
+        )
     
-    def get_latest_bar(self, topic_id: str) -> Optional[Bar]:
+    def get_latest_bar(
+        self, 
+        topic_id: str, 
+        resolution: Optional[str] = None,
+        generate_summary: bool = True
+    ) -> Optional[Bar]:
         """Get the most recent bar for a topic."""
-        bars = self.get_bars(topic_id, limit=1)
+        bars = self.get_bars(topic_id, resolution=resolution, limit=1, generate_summaries=generate_summary)
         return bars[0] if bars else None
+    
+    def get_tick_count(self, topic_id: str) -> int:
+        """Get raw tick count for a topic."""
+        topic = self._topics.get(topic_id)
+        if not topic:
+            return 0
+        return self.tick_store.get_tick_count(topic.label)
 
 
 class TickPoller:
     """
     Background service that polls X API for all active topics.
     
+    Polls at minimum resolution (15s) to collect granular tick data.
+    Bars are generated on-demand at any resolution.
+    
     Usage:
-        poller = TickPoller(topic_manager, poll_interval=300)
-        
-        # Start polling (runs in background)
-        await poller.start()
-        
-        # Stop polling
+        poller = TickPoller(topic_manager)
+        await poller.start()  # Polls every 15s by default
         await poller.stop()
     """
     
     def __init__(
         self,
         topic_manager: TopicManager,
-        poll_interval: int = 300,  # 5 minutes default
-        generate_summaries: bool = True
+        poll_interval: int = MIN_RESOLUTION_SECONDS,  # Default: 15s
     ):
         self.topic_manager = topic_manager
         self.poll_interval = poll_interval
-        self.generate_summaries = generate_summaries
         self._running = False
         self._task: Optional[asyncio.Task] = None
     
@@ -335,19 +374,14 @@ class TickPoller:
             logger.debug("No active topics to poll")
             return
         
-        logger.info(f"Polling {len(active_topics)} active topics")
-        
         for topic in active_topics:
             try:
-                await self.topic_manager.poll_topic(
-                    topic.id,
-                    generate_summary=self.generate_summaries
-                )
+                await self.topic_manager.poll_topic(topic.id)
             except Exception as e:
                 logger.error(f"Error polling topic {topic.id}: {e}")
             
             # Small delay between topics to avoid rate limits
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
     
     async def poll_now(self, topic_id: Optional[str] = None):
         """
@@ -357,7 +391,7 @@ class TickPoller:
             topic_id: Specific topic to poll, or None to poll all
         """
         if topic_id:
-            await self.topic_manager.poll_topic(topic_id, generate_summary=self.generate_summaries)
+            await self.topic_manager.poll_topic(topic_id)
         else:
             await self._poll_all_topics()
 
@@ -367,5 +401,7 @@ __all__ = [
     "TopicStatus",
     "TopicManager",
     "TickPoller",
+    "RESOLUTION_MAP",
+    "DEFAULT_RESOLUTION",
+    "MIN_RESOLUTION_SECONDS",
 ]
-

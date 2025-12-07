@@ -255,6 +255,19 @@ class XAdapter:
         
         # Build time bounds
         if start_time and end_time:
+            # X API requires end_time to be at least 10 seconds before now
+            now = datetime.now(timezone.utc)
+            min_allowed_end = now - timedelta(seconds=12)  # 12 second buffer for safety
+            
+            if end_time > min_allowed_end:
+                # Bar is too recent to query - X API will reject it
+                seconds_until_ready = (end_time - min_allowed_end).total_seconds()
+                logger.warning(
+                    f"Bar end_time {end_time.strftime('%H:%M:%S')} is too recent for X API. "
+                    f"Need to wait ~{seconds_until_ready:.0f}s. Returning empty results."
+                )
+                return []
+            
             start_str = self._format_time(start_time)
             end_str = self._format_time(end_time)
         else:

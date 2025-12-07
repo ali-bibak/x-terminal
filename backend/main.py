@@ -99,6 +99,19 @@ async def lifespan(app: FastAPI):
     logger.info("Starting X Terminal backend...")
     # Initialize adapters
     rate_limiter = RateLimiter()
+    
+    # Configure Grok rate limits (generous - Grok API handles its own limits)
+    from adapter.rate_limiter import RateLimitConfig
+    rate_limiter.configure_limit("grok_fast", RateLimitConfig(
+        requests_per_window=60,  # 60 requests per minute
+        window_seconds=60,
+        strategy="sliding_window"
+    ))
+    rate_limiter.configure_limit("grok_reasoning", RateLimitConfig(
+        requests_per_window=30,  # 30 requests per minute (reasoning is slower)
+        window_seconds=60,
+        strategy="sliding_window"
+    ))
 
     x_adapter = XAdapter(
         bearer_token=os.environ.get("X_BEARER_TOKEN"),

@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: "Chirp";
+  src: url("/Chirp Regular.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Chirp";
+  src: url("/Chirp Medium.woff") format("woff");
+  font-weight: 500;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Chirp";
+  src: url("/Chirp Bold.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Chirp";
+  src: url("/Chirp Heavy.woff") format("woff");
+  font-weight: 900;
+  font-style: normal;
+}
+
+@theme {
+  --font-sans: "Chirp", system-ui, -apple-system, sans-serif;
+  --color-background: #000000;
+}
+
+html {
+  @apply h-full;
+}
+
+body {
+  @apply bg-background text-white h-full;
+}

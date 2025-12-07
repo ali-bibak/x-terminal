@@ -95,7 +95,7 @@ X Terminal treats posts like **market ticks** and aggregates them into **time ba
 | **TickStore** | Raw X posts in memory | — |
 | **BarScheduler** | Background bar generation + Grok | Async |
 | **BarStore** | Pre-computed bars cache | ~10ms |
-| **On-Demand Fallback** | Generate from ticks if not cached | ~50ms |
+| **On-Demand Fallback** | Generate from ticks if not cached | Grok Call |
 
 Result: **Dashboards are always instant**, AI summaries populate asynchronously.
 

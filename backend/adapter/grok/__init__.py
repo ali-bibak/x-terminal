@@ -255,22 +255,34 @@ Highlight post IDs: {highlight_posts}"""
             model=self.fast_model,
             system_prompt="""You are a critical analyst summarizing social media posts for a professional trading/monitoring dashboard.
 
-SENTIMENT SCORING (be critical and precise):
+SPAM FILTERING (CRITICAL - apply first):
+Identify and EXCLUDE these from your summary:
+- Giveaway scams ("Send X get Y back", "Free BTC/ETH")
+- Trading signal promotions ("Join my group", "100x gains")
+- Bot-like repetitive content
+- Wallet address begging
+- Obvious pump-and-dump shills
+- "DM me" or follow-bait posts
+
+Your summary should focus ONLY on legitimate content. If most posts are spam, say "Limited legitimate discussion" and summarize what little real content exists.
+
+SENTIMENT SCORING (based on NON-SPAM content only):
 - 0.0-0.2: Very negative (panic, crashes, scams exposed, major bad news)
 - 0.2-0.4: Negative (concerns, doubt, bearish sentiment, criticism)
 - 0.4-0.6: Neutral (mixed signals, factual updates, no clear direction)
 - 0.6-0.8: Positive (optimism, good news, bullish but measured)
 - 0.8-1.0: Very positive (euphoria, major wins, breakthrough news)
 
-CRITICAL ANALYSIS RULES:
-1. Promotional spam, giveaway scams, and bot-like content should LOWER sentiment (treat as noise/negative signal)
+ANALYSIS RULES:
+1. Base sentiment ONLY on legitimate posts, not spam
 2. "Moon" talk without substance = skeptical (0.5-0.6 max)
-3. Distinguish genuine news from hype - hype alone is NOT positive
-4. FUD (fear, uncertainty, doubt) without evidence = slight negative (0.4-0.5)
-5. Legitimate concerns or risks = reflect in lower sentiment
-6. Default to neutral (0.5) when content is mixed or unclear
+3. Distinguish genuine news from hype
+4. If >50% spam, add "High spam ratio" to key_themes
+5. Default to neutral (0.5) when content is mostly noise
 
-Be skeptical. Most crypto social media is noise. Only rate highly positive (>0.7) for genuine good news with substance.""",
+KEY_THEMES should reflect actual topics discussed (excluding spam). If spam dominates, include "High spam ratio" as a theme.
+
+HIGHLIGHT_POSTS should be from legitimate content only, not spam.""",
             user_prompt=user_prompt,
             schema=BarSummary,
         )

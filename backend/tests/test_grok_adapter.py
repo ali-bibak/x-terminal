@@ -7,17 +7,16 @@ from unittest.mock import Mock, patch
 from adapter.grok import (
     GrokAdapter,
     BarSummary,
-    TopicDigest,
-    MonitorInsight
+    TopicDigest
 )
 from adapter.grok.mocks import (
     mock_bar_summary,
     mock_topic_digest,
     mock_intel_summary,
-    mock_monitor_insight,
     mock_fact_check_report,
     mock_digest_overview
 )
+from adapter.x import Tick
 from adapter.rate_limiter import RateLimiter, RateLimitConfig
 
 
@@ -112,23 +111,43 @@ class TestGrokAdapter:
         assert isinstance(summary, BarSummary)
         assert summary.post_count == 0
         assert "No posts" in summary.summary
+        assert summary.highlight_posts is None
 
     def test_mock_bar_summary_with_posts(self):
         """Test mock bar summary with posts."""
-        posts = [
-            {"author": "user1", "text": "Great news!"},
-            {"author": "user2", "text": "Interesting development"}
+        ticks = [
+            Tick(
+                id="tick1",
+                author="user1",
+                text="Great news!",
+                timestamp=datetime.now(timezone.utc),
+                permalink="https://twitter.com/user1/status/tick1",
+                metrics={"retweet_count": 10, "like_count": 20},
+                topic="test_topic"
+            ),
+            Tick(
+                id="tick2",
+                author="user2",
+                text="Interesting development",
+                timestamp=datetime.now(timezone.utc),
+                permalink="https://twitter.com/user2/status/tick2",
+                metrics={"retweet_count": 5, "like_count": 15},
+                topic="test_topic"
+            )
         ]
         start_time = datetime.now(timezone.utc)
         end_time = start_time + timedelta(minutes=5)
 
-        summary = mock_bar_summary("test_topic", posts, start_time, end_time)
+        summary = mock_bar_summary("test_topic", ticks, start_time, end_time)
 
         assert isinstance(summary, BarSummary)
         assert summary.post_count == 2
         assert summary.summary is not None
         assert summary.sentiment in ["positive", "negative", "neutral", "mixed"]
         assert summary.engagement_level in ["low", "medium", "high"]
+        assert summary.highlight_posts is not None
+        assert len(summary.highlight_posts) <= 2
+        assert all(pid in ["tick1", "tick2"] for pid in summary.highlight_posts)
 
     def test_mock_topic_digest_no_bars(self):
         """Test mock topic digest with no bars."""

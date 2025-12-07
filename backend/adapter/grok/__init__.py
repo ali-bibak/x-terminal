@@ -14,6 +14,7 @@ from dotenv import load_dotenv, find_dotenv
 from pydantic import BaseModel, Field
 
 from ..rate_limiter import RateLimiter, shared_limiter
+from ..x import Tick
 
 load_dotenv(find_dotenv(usecwd=True))
 
@@ -44,13 +45,6 @@ class IntelSummary(BaseModel):
     recent_activity: List[str] = Field(description="Bullet list of recent actions")
 
 
-class MonitorInsight(BaseModel):
-    topic: str = Field(description="Topic being monitored")
-    headline: str = Field(description="One-line headline for the latest pulse")
-    impact_score: int = Field(description="0-100 subjective impact score", ge=0, le=100)
-    tags: List[str] = Field(description="Tags that categorize the event")
-
-
 class FactCheckReport(BaseModel):
     url: str = Field(description="URL that was fact checked")
     verdict: str = Field(description="true / false / unclear verdict")
@@ -73,6 +67,7 @@ class BarSummary(BaseModel):
     sentiment: str = Field(description="Overall sentiment: positive/negative/neutral/mixed")
     post_count: int = Field(description="Number of posts in this bar")
     engagement_level: str = Field(description="low/medium/high engagement level")
+    highlight_posts: Optional[List[str]] = Field(default=None, description="1-2 most representative post IDs from this bar")
 
 
 class TopicDigest(BaseModel):
@@ -165,17 +160,6 @@ class GrokAdapter:
             return payload
         raise RuntimeError(f"Grok API call failed for summarize_user({handle}). No fallback available.")
 
-    def monitor_topic(self, topic: str) -> MonitorInsight:
-        payload = self._structured_call(
-            model=self.fast_model,
-            system_prompt="Provide a short monitor insight for a live-ops dashboard.",
-            user_prompt=f"Topic: {topic}\nNeed headline + impact score + tags.",
-            schema=MonitorInsight,
-        )
-        if isinstance(payload, MonitorInsight):
-            return payload
-        raise RuntimeError(f"Grok API call failed for monitor_topic({topic}). No fallback available.")
-
     def fact_check(self, url: str, text: str) -> FactCheckReport:
         payload = self._structured_call(
             model=self.reasoning_model,
@@ -203,12 +187,12 @@ class GrokAdapter:
     # X Terminal specific methods
     # ---------------------------------------------------------------------
 
-    def summarize_bar(self, topic: str, posts: List[Dict[str, Any]], start_time: datetime, end_time: datetime) -> BarSummary:
+    def summarize_bar(self, topic: str, ticks: List[Tick], start_time: datetime, end_time: datetime) -> BarSummary:
         """
         Generate a summary for a time-barred window of posts.
         Uses fast model for quick, structured summaries.
         """
-        if not posts:
+        if not ticks:
             return BarSummary(
                 summary="No posts in this time window",
                 key_themes=[],
@@ -217,10 +201,13 @@ class GrokAdapter:
                 engagement_level="low"
             )
 
+        # Select 1-2 highlight posts (prioritize by engagement, then recency)
+        highlight_posts = self._select_highlight_posts(ticks)
+
         # Create a readable representation of the posts
         posts_text = "\n".join([
-            f"@{post.get('author', 'unknown')}: {post.get('text', '')[:200]}..."
-            for post in posts[:10]  # Limit to first 10 posts for summary
+            f"@{tick.author}: {tick.text[:200]}..."
+            for tick in ticks[:10]  # Limit to first 10 posts for summary
         ])
 
         time_range = f"{start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')}"
@@ -242,11 +229,41 @@ Create a brief, structured summary focused on what happened in this specific tim
         )
 
         if isinstance(payload, BarSummary):
-            # Ensure post_count matches actual data
-            payload.post_count = len(posts)
+            # Ensure post_count matches actual data and add highlight posts
+            payload.post_count = len(ticks)
+            payload.highlight_posts = highlight_posts
             return payload
 
         raise RuntimeError(f"Grok API call failed for summarize_bar({topic}). No fallback available.")
+
+    def _select_highlight_posts(self, ticks: List[Tick]) -> Optional[List[str]]:
+        """
+        Select 1-2 most representative posts from the tick list.
+        Prioritizes by engagement metrics, then by recency.
+        """
+        if len(ticks) <= 2:
+            # If 2 or fewer posts, include all of them
+            return [tick.id for tick in ticks]
+
+        # Calculate engagement score for each tick
+        def calculate_engagement(tick: Tick) -> int:
+            metrics = tick.metrics
+            return (
+                metrics.get('retweet_count', 0) * 3 +  # Retweets are highly engaging
+                metrics.get('like_count', 0) * 2 +      # Likes show approval
+                metrics.get('reply_count', 0) * 4 +     # Replies show discussion
+                metrics.get('quote_count', 0) * 2       # Quotes spread content
+            )
+
+        # Sort by engagement score (descending), then by timestamp (most recent first)
+        sorted_ticks = sorted(
+            ticks,
+            key=lambda t: (calculate_engagement(t), t.timestamp),
+            reverse=True
+        )
+
+        # Return IDs of top 1-2 posts
+        return [tick.id for tick in sorted_ticks[:2]]
 
     def create_topic_digest(self, topic: str, bars_data: List[Dict[str, Any]], lookback_hours: int = 1) -> TopicDigest:
         """
@@ -296,7 +313,6 @@ Provide contextual analysis of trends, developments, and recommendations for mon
 __all__ = [
     "GrokAdapter",
     "IntelSummary",
-    "MonitorInsight",
     "FactCheckReport",
     "DigestOverview",
     "BarSummary",

@@ -4,11 +4,11 @@ import json
 from typing import List
 
 from . import GrokAdapter
+from ..x import Tick
 
 PROMPT = """\
 Commands:
   intel      → summarize a handle
-  watch      → generate a monitor insight for a topic
   factcheck  → run a fact-check on a URL + text
   digest     → build a digest from highlight bullets
   barsum     → summarize a bar of posts (X Terminal)
@@ -55,12 +55,6 @@ def main() -> None:
             _print(summary.model_dump())
             continue
 
-        if command == "watch":
-            topic = input('Topic (e.g. "ai elections"): ').strip() or "demo topic"
-            insight = adapter.monitor_topic(topic)
-            _print(insight.model_dump())
-            continue
-
         if command == "factcheck":
             url = input("URL: ").strip() or "https://x.com/demo/status/1"
             text = input("Post text (optional): ").strip() or "Sample post text about Grok."
@@ -78,18 +72,29 @@ def main() -> None:
         if command == "barsum":
             topic = input('Topic (e.g. "$TSLA"): ').strip() or "$TSLA"
             posts_raw = input("Posts (format: author|text|author|text...): ").strip()
-            posts = []
+            ticks = []
             if posts_raw:
                 parts = posts_raw.split("|")
                 for i in range(0, len(parts), 2):
                     if i + 1 < len(parts):
-                        posts.append({"author": parts[i].strip(), "text": parts[i+1].strip()})
+                        author = parts[i].strip()
+                        text = parts[i+1].strip()
+                        tick = Tick(
+                            id=f"cli_{i//2}",
+                            author=author,
+                            text=text,
+                            timestamp=datetime.now(timezone.utc),
+                            permalink=f"https://twitter.com/{author}/status/cli_{i//2}",
+                            metrics={"retweet_count": 0, "like_count": 0, "reply_count": 0, "quote_count": 0},
+                            topic=topic
+                        )
+                        ticks.append(tick)
 
             from datetime import datetime, timedelta, timezone
             start_time = datetime.now(timezone.utc) - timedelta(minutes=5)
             end_time = datetime.now(timezone.utc)
 
-            summary = adapter.summarize_bar(topic, posts, start_time, end_time)
+            summary = adapter.summarize_bar(topic, ticks, start_time, end_time)
             _print(summary.model_dump())
             continue
 

@@ -9,7 +9,8 @@ import random
 from datetime import datetime, timezone
 from typing import List, Dict, Any
 
-from . import IntelSummary, MonitorInsight, FactCheckReport, DigestOverview, BarSummary, TopicDigest
+from . import IntelSummary, FactCheckReport, DigestOverview, BarSummary, TopicDigest
+from ..x import Tick
 
 
 def mock_rng(seed_source: str) -> random.Random:
@@ -46,18 +47,6 @@ def mock_intel_summary(handle: str, posts: List[str]) -> IntelSummary:
     )
 
 
-def mock_monitor_insight(topic: str) -> MonitorInsight:
-    """Mock implementation of MonitorInsight for testing."""
-    rng = mock_rng(topic)
-    tags = rng.sample(
-        ["tech", "politics", "finance", "culture", "controversial", "wholesome"],
-        k=2,
-    )
-    headline = f"Spike in {topic} chatter from {rng.choice(['creators', 'policy wonks', 'finfluencers'])}"
-    score = rng.randint(35, 92)
-    return MonitorInsight(topic=topic, headline=headline, impact_score=score, tags=tags)
-
-
 def mock_fact_check_report(url: str, text: str) -> FactCheckReport:
     """Mock implementation of FactCheckReport for testing."""
     rng = mock_rng(url + text)
@@ -89,10 +78,10 @@ def mock_digest_overview(highlights: List[str]) -> DigestOverview:
     )
 
 
-def mock_bar_summary(topic: str, posts: List[Dict[str, Any]], start_time: datetime, end_time: datetime) -> BarSummary:
+def mock_bar_summary(topic: str, ticks: List[Tick], start_time: datetime, end_time: datetime) -> BarSummary:
     """Mock implementation of BarSummary for testing."""
     rng = mock_rng(f"{topic}_{start_time}_{end_time}")
-    post_count = len(posts)
+    post_count = len(ticks)
 
     if post_count == 0:
         return BarSummary(
@@ -102,6 +91,9 @@ def mock_bar_summary(topic: str, posts: List[Dict[str, Any]], start_time: dateti
             post_count=0,
             engagement_level="low"
         )
+
+    # Select highlight posts (simple mock: just pick first 1-2)
+    highlight_posts = [tick.id for tick in ticks[:2]] if ticks else None
 
     # Generate plausible themes based on topic
     base_themes = ["discussion", "updates", "reactions", "analysis"]
@@ -121,7 +113,8 @@ def mock_bar_summary(topic: str, posts: List[Dict[str, Any]], start_time: dateti
         key_themes=themes,
         sentiment=sentiment,
         post_count=post_count,
-        engagement_level=engagement
+        engagement_level=engagement,
+        highlight_posts=highlight_posts
     )
 
 

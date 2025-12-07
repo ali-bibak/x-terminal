@@ -13,33 +13,54 @@ X Terminal aggregates X posts into time-based "bars" (like market data) and uses
 ## ✨ Features
 
 - **Topic Watching** — Track any topic via X search query (e.g., `$TSLA`, `"AI news"`)
-- **Time Bars** — Posts aggregated into 5m, 10m, or hourly windows with metrics
+- **Multi-Resolution Bars** — Switch between 15s, 30s, 1m, 5m, 15m, 30m, 1h views instantly
 - **AI Summaries** — Grok-powered summaries for each bar (what happened?)
 - **Topic Digests** — One-shot analysis across multiple bars (what's the trend?)
+- **Smart Caching** — Summary cache for instant resolution switching
+- **Real-time Monitoring** — Live metrics, rate limits, and activity feed
 - **Terminal Aesthetic** — Dark theme with Bloomberg/terminal vibes
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────┐     HTTP/JSON     ┌─────────────────────────────────┐
-│                 │◄────────────────► │  Python FastAPI Backend         │
-│  Next.js/Svelte │                   │                                 │
-│  Frontend       │                   │  ┌─────────┐  ┌─────────────┐  │
-│                 │                   │  │ X       │  │ Grok        │  │
-└─────────────────┘                   │  │ Adapter │  │ Adapter     │  │
-                                      │  └────┬────┘  └──────┬──────┘  │
-                                      │       │              │         │
-                                      │  ┌────▼──────────────▼─────┐  │
-                                      │  │   BarAggregator         │  │
-                                      │  │   TopicManager          │  │
-                                      │  │   DigestService         │  │
-                                      │  └─────────────────────────┘  │
-                                      └─────────────────────────────────┘
+┌─────────────────┐     HTTP/JSON     ┌─────────────────────────────────────────┐
+│                 │◄────────────────► │  Python FastAPI Backend                 │
+│  Next.js/Svelte │                   │                                         │
+│  Frontend       │                   │  ┌─────────┐  ┌─────────────┐           │
+│                 │                   │  │ X       │  │ Grok        │           │
+└─────────────────┘                   │  │ Adapter │  │ Adapter     │           │
+                                      │  └────┬────┘  └──────┬──────┘           │
+                                      │       │              │                  │
+                                      │  ┌────▼──────────────▼─────────────┐   │
+                                      │  │   TickStore (raw posts)         │   │
+                                      │  │   BarGenerator (on-demand)      │   │
+                                      │  │   SummaryCache (fast switching) │   │
+                                      │  │   TopicManager / DigestService  │   │
+                                      │  └─────────────────────────────────┘   │
+                                      │                                         │
+                                      │  ┌─────────────────────────────────┐   │
+                                      │  │   📊 Monitoring                  │   │
+                                      │  │   (metrics, rate limits, health) │   │
+                                      │  └─────────────────────────────────┘   │
+                                      └─────────────────────────────────────────┘
                                                     │
                                       ┌─────────────┴─────────────┐
                                       ▼                           ▼
                                X API (Twitter)              xAI Grok API
 ```
+
+### On-Demand Bar Generation
+
+X Terminal stores raw ticks and generates bars **on-demand** at any resolution:
+
+1. **TickStore** — Raw posts stored per topic
+2. **BarGenerator** — Groups ticks into bars at requested resolution
+3. **SummaryCache** — Caches Grok summaries for instant resolution switching
+
+This enables:
+- ⚡ Instant switching between 15s, 1m, 5m views
+- 🎯 High-quality summaries (always from raw data)
+- 💰 Efficient API usage (summaries cached)
 
 ## 📁 Project Structure
 
@@ -51,9 +72,11 @@ x-terminal/
 │   │   ├── grok/           # Grok AI adapter
 │   │   ├── models.py       # Shared Pydantic models (Tick)
 │   │   └── rate_limiter.py # Shared rate limiting
-│   ├── aggregator/         # BarAggregator, DigestService
+│   ├── aggregator/         # TickStore, BarGenerator, SummaryCache, DigestService
 │   ├── core/               # TopicManager, TickPoller
 │   ├── api/                # FastAPI routes
+│   ├── monitoring/         # 📊 Metrics, health, activity feed
+│   ├── database/           # SQLite persistence
 │   ├── main.py             # App entry point
 │   └── tests/              # pytest tests
 ├── frontend/               # Svelte frontend
@@ -67,7 +90,7 @@ x-terminal/
 
 - Python 3.11+
 - Node.js 18+
-- X API Bearer Token ([consule.x.com](https://consule.x.com))
+- X API Bearer Token ([console.x.com](https://console.x.com))
 - xAI API Key ([x.ai](https://x.ai))
 
 ### Backend Setup
@@ -75,12 +98,12 @@ x-terminal/
 ```bash
 cd backend
 
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
+# Create virtual environment (using setup script)
+./setup.sh
+# Or manually:
+# python -m venv venv
+# source venv/bin/activate
+# pip install -r requirements.txt
 
 # Configure environment
 cp .env.example .env
@@ -89,7 +112,8 @@ cp .env.example .env
 #   XAI_API_KEY=your_xai_api_key
 
 # Run the server
-uvicorn main:app --reload --port 8000
+./run.sh
+# Or: uvicorn main:app --reload --port 8000
 ```
 
 ### Frontend Setup
@@ -102,6 +126,8 @@ npm run dev
 
 ## 🔌 API Endpoints
 
+### Topics
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/v1/health` | Health check |
@@ -111,10 +137,23 @@ npm run dev
 | `DELETE` | `/api/v1/topics/{id}` | Remove topic |
 | `POST` | `/api/v1/topics/{id}/pause` | Pause polling |
 | `POST` | `/api/v1/topics/{id}/resume` | Resume polling |
+| `PATCH` | `/api/v1/topics/{id}/resolution` | Change resolution |
 | `GET` | `/api/v1/topics/{id}/bars` | Get bar timeline |
 | `GET` | `/api/v1/topics/{id}/bars/latest` | Get latest bar |
 | `POST` | `/api/v1/topics/{id}/poll` | Manual poll trigger |
 | `POST` | `/api/v1/topics/{id}/digest` | Generate AI digest |
+
+### Monitoring 📊
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/monitor/dashboard` | Full dashboard data |
+| `GET` | `/api/v1/monitor/health` | System health & components |
+| `GET` | `/api/v1/monitor/metrics` | Performance metrics |
+| `GET` | `/api/v1/monitor/rate-limits` | API rate limit status |
+| `GET` | `/api/v1/monitor/activity` | Real-time event feed |
+| `GET` | `/api/v1/monitor/topics` | Detailed topic stats |
+| `GET` | `/api/v1/monitor/live-stats` | Lightweight live stats |
 
 ### Example: Create and Monitor a Topic
 
@@ -125,17 +164,75 @@ curl -X POST http://localhost:8000/api/v1/topics \
   -d '{
     "label": "$TSLA",
     "query": "$TSLA OR Tesla stock",
-    "resolution": "5m"
+    "resolution": "1m"
   }'
 
 # 2. Poll for data
 curl -X POST http://localhost:8000/api/v1/topics/tsla/poll
 
-# 3. Get bars
-curl "http://localhost:8000/api/v1/topics/tsla/bars?limit=50"
+# 3. Get bars at different resolutions
+curl "http://localhost:8000/api/v1/topics/tsla/bars?resolution=15s&limit=50"
+curl "http://localhost:8000/api/v1/topics/tsla/bars?resolution=5m&limit=20"
 
 # 4. Generate digest
 curl -X POST "http://localhost:8000/api/v1/topics/tsla/digest?lookback_bars=12"
+
+# 5. Check rate limits
+curl http://localhost:8000/api/v1/monitor/rate-limits
+
+# 6. View full dashboard
+curl http://localhost:8000/api/v1/monitor/dashboard
+```
+
+## 📊 Monitoring Dashboard
+
+The monitoring endpoints provide high-ROI observability:
+
+### Rate Limits (`/monitor/rate-limits`)
+```json
+{
+  "categories": {
+    "x_search": {
+      "limit": 300,
+      "remaining": 245,
+      "usage_percent": "18.3%",
+      "status": "ok",
+      "emoji": "🟢"
+    },
+    "grok_fast": {
+      "limit": 60,
+      "remaining": 12,
+      "usage_percent": "80.0%",
+      "status": "warning",
+      "emoji": "🟡"
+    }
+  }
+}
+```
+
+### System Health (`/monitor/health`)
+```json
+{
+  "status": "healthy",
+  "components": {
+    "x_adapter": {"status": "healthy"},
+    "grok_adapter": {"status": "healthy"},
+    "poller": {"status": "healthy", "details": {"interval": 15}},
+    "database": {"status": "healthy"}
+  }
+}
+```
+
+### Live Stats (`/monitor/live-stats`)
+```json
+{
+  "uptime": "2h 15m",
+  "topics_active": 3,
+  "total_ticks": 2500,
+  "ticks_per_minute": 18.5,
+  "cache_hit_rate": "90.0%",
+  "rate_limit_status": "ok"
+}
 ```
 
 ## 🧪 Testing
@@ -145,7 +242,8 @@ cd backend
 source venv/bin/activate
 
 # Run all tests
-pytest -v
+./test.sh
+# Or: pytest -v --disable-warnings
 
 # Run specific test file
 pytest tests/test_aggregator.py -v
@@ -189,8 +287,20 @@ python -m adapter.grok.cli
 | `GROK_MODEL_FAST` | Fast model for summaries | `grok-4-1-fast` |
 | `GROK_MODEL_REASONING` | Reasoning model for digests | `grok-4-1-fast-reasoning` |
 | `AUTO_POLL` | Enable background polling | `false` |
-| `POLL_INTERVAL` | Polling interval (seconds) | `300` |
+| `POLL_INTERVAL` | Polling interval (seconds) | `15` |
 | `PORT` | Server port | `8000` |
+
+### Resolution Options
+
+| Resolution | Description |
+|------------|-------------|
+| `15s` | Minimum - for hackathon demos |
+| `30s` | Half-minute granularity |
+| `1m` | Default - per minute |
+| `5m` | 5-minute windows |
+| `15m` | Quarter-hour |
+| `30m` | Half-hour |
+| `1h` | Hourly aggregation |
 
 ## 📊 Data Models
 
@@ -212,9 +322,9 @@ Time-windowed aggregate:
 ```python
 {
   "topic": "$TSLA",
-  "resolution": "5m",
+  "resolution": "1m",
   "start": "2024-01-15T12:00:00Z",
-  "end": "2024-01-15T12:05:00Z",
+  "end": "2024-01-15T12:01:00Z",
   "post_count": 42,
   "total_likes": 5000,
   "summary": "Tesla stock discussed amid...",

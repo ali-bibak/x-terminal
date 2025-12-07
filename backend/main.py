@@ -17,9 +17,10 @@ from adapter.grok import GrokAdapter
 from adapter.rate_limiter import RateLimiter
 from adapter.x import XAdapter
 from aggregator import DigestService, MIN_RESOLUTION_SECONDS, DEFAULT_RESOLUTION
-from api import router, set_dependencies
+from api import router, set_dependencies, set_rate_limiter
 from core import TickPoller, TopicManager
 from database import init_db
+from monitoring import monitor, EventType
 
 # Load environment variables
 load_dotenv()
@@ -92,16 +93,34 @@ async def lifespan(app: FastAPI):
 
     # Set dependencies for API routes
     set_dependencies(topic_manager, tick_poller, digest_service)
+    set_rate_limiter(rate_limiter)
+
+    # Configure monitoring
+    monitor.set_component_status(
+        "x_adapter",
+        "healthy" if x_adapter.is_configured else "warning",
+        {"configured": x_adapter.is_configured}
+    )
+    monitor.set_component_status(
+        "grok_adapter", 
+        "healthy" if grok_adapter.is_live else "warning",
+        {"live": grok_adapter.is_live}
+    )
+    monitor.set_component_status("database", "healthy", {"initialized": True})
 
     # Start background poller
     auto_poll = os.environ.get("AUTO_POLL", "false").lower() == "true"
     if auto_poll:
         await tick_poller.start()
+        monitor.set_component_status("poller", "healthy", {"interval": poll_interval})
         logger.info(f"✓ Background poller started (interval: {poll_interval}s)")
         logger.info(f"  Bars generated on-demand at any resolution: 15s, 30s, 1m, 5m, ...")
     else:
+        monitor.set_component_status("poller", "warning", {"enabled": False})
         logger.info("ℹ Background poller disabled (set AUTO_POLL=true to enable)")
 
+    # Log monitoring endpoints
+    logger.info("📊 Monitoring available at /api/v1/monitor/*")
     logger.info("X Terminal backend ready!")
 
     yield  # Application runs here

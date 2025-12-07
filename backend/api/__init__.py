@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from core import TopicManager, Topic, TopicStatus, TickPoller, RESOLUTION_MAP, DEFAULT_RESOLUTION
 from aggregator import Bar, DigestService
+from monitoring import monitor, get_rate_limit_status, EventType
 
 logger = logging.getLogger(__name__)
 
@@ -455,5 +456,214 @@ async def create_digest(
         raise HTTPException(status_code=500, detail=f"Failed to generate digest: {e}")
 
 
-__all__ = ["router", "set_dependencies"]
+# ============================================================================
+# Monitoring & Observability
+# ============================================================================
+
+# Store rate limiter reference for monitoring
+_rate_limiter = None
+
+def set_rate_limiter(rate_limiter):
+    """Set the rate limiter for monitoring."""
+    global _rate_limiter
+    _rate_limiter = rate_limiter
+
+
+@router.get("/monitor/dashboard", tags=["Monitoring"])
+async def get_dashboard():
+    """
+    📊 Full monitoring dashboard data.
+    
+    Returns all metrics, health status, and recent activity in one call.
+    Perfect for a monitoring UI.
+    """
+    return monitor.get_dashboard_data()
+
+
+@router.get("/monitor/health", tags=["Monitoring"])
+async def get_system_health():
+    """
+    🏥 System health check with component status.
+    
+    Returns overall health and per-component breakdown.
+    """
+    return monitor.get_health_status()
+
+
+@router.get("/monitor/metrics", tags=["Monitoring"])
+async def get_metrics():
+    """
+    📈 Detailed performance metrics.
+    
+    Includes:
+    - Request counts and latencies
+    - Cache hit rates
+    - API call statistics
+    - Data pipeline throughput
+    """
+    return monitor.metrics.get_metrics()
+
+
+@router.get("/monitor/rate-limits", tags=["Monitoring"])
+async def get_rate_limits():
+    """
+    ⏱️ API rate limit status.
+    
+    Shows current usage vs limits for:
+    - X API (search, user lookup)
+    - Grok API (fast model, reasoning model)
+    """
+    if _rate_limiter is None:
+        return {"error": "Rate limiter not configured", "categories": {}}
+    
+    status = get_rate_limit_status(_rate_limiter)
+    
+    # Add visual indicators
+    for category, info in status.items():
+        if info["status"] == "critical":
+            info["emoji"] = "🔴"
+        elif info["status"] == "warning":
+            info["emoji"] = "🟡"
+        else:
+            info["emoji"] = "🟢"
+    
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "categories": status,
+        "summary": {
+            "total_categories": len(status),
+            "critical": sum(1 for s in status.values() if s["status"] == "critical"),
+            "warning": sum(1 for s in status.values() if s["status"] == "warning"),
+            "ok": sum(1 for s in status.values() if s["status"] == "ok"),
+        }
+    }
+
+
+@router.get("/monitor/activity", tags=["Monitoring"])
+async def get_activity_feed(
+    limit: int = Query(default=50, ge=1, le=200, description="Number of events"),
+    event_type: Optional[str] = Query(default=None, description="Filter by event type")
+):
+    """
+    📜 Real-time activity feed.
+    
+    Recent system events including:
+    - Polls and tick additions
+    - Bar generations
+    - Cache hits/misses
+    - Errors and warnings
+    """
+    # Parse event type if provided
+    filter_type = None
+    if event_type:
+        try:
+            filter_type = EventType(event_type)
+        except ValueError:
+            valid_types = [e.value for e in EventType]
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid event_type. Valid options: {valid_types}"
+            )
+    
+    events = monitor.activity.get_recent(limit=limit, event_type=filter_type)
+    event_counts = monitor.activity.get_event_counts(since_minutes=5)
+    
+    return {
+        "events": events,
+        "event_counts_5m": event_counts,
+        "available_types": [e.value for e in EventType],
+    }
+
+
+@router.get("/monitor/topics", tags=["Monitoring"])
+async def get_topics_status(manager: TopicManager = Depends(get_topic_manager)):
+    """
+    📋 Detailed topic status and statistics.
+    
+    Per-topic breakdown including:
+    - Tick counts and data freshness
+    - Poll history
+    - Error status
+    """
+    topics = manager.list_topics()
+    
+    topic_stats = []
+    for topic in topics:
+        # Calculate data freshness
+        freshness = None
+        if topic.last_poll:
+            age = (datetime.now(timezone.utc) - topic.last_poll).total_seconds()
+            freshness = {
+                "seconds_ago": int(age),
+                "status": "fresh" if age < 60 else ("stale" if age < 300 else "very_stale"),
+                "emoji": "🟢" if age < 60 else ("🟡" if age < 300 else "🔴"),
+            }
+        
+        topic_stats.append({
+            "id": topic.id,
+            "label": topic.label,
+            "status": topic.status.value,
+            "status_emoji": "✅" if topic.status == TopicStatus.ACTIVE else ("⏸️" if topic.status == TopicStatus.PAUSED else "❌"),
+            "resolution": topic.resolution,
+            "tick_count": topic.tick_count,
+            "poll_count": topic.poll_count,
+            "last_poll": topic.last_poll.isoformat() if topic.last_poll else None,
+            "data_freshness": freshness,
+            "last_error": topic.last_error,
+            "created_at": topic.created_at.isoformat(),
+        })
+    
+    # Summary stats
+    active = sum(1 for t in topics if t.status == TopicStatus.ACTIVE)
+    total_ticks = sum(t.tick_count for t in topics)
+    
+    return {
+        "summary": {
+            "total_topics": len(topics),
+            "active": active,
+            "paused": sum(1 for t in topics if t.status == TopicStatus.PAUSED),
+            "error": sum(1 for t in topics if t.status == TopicStatus.ERROR),
+            "total_ticks": total_ticks,
+        },
+        "topics": topic_stats,
+    }
+
+
+@router.get("/monitor/live-stats", tags=["Monitoring"])
+async def get_live_stats(manager: TopicManager = Depends(get_topic_manager)):
+    """
+    ⚡ Live statistics for real-time display.
+    
+    Lightweight endpoint optimized for frequent polling.
+    Returns key metrics only.
+    """
+    metrics = monitor.metrics.get_metrics()
+    topics = manager.list_topics()
+    
+    active_topics = [t for t in topics if t.status == TopicStatus.ACTIVE]
+    total_ticks = sum(t.tick_count for t in topics)
+    
+    # Get rate limit summary
+    rate_limit_status = "ok"
+    if _rate_limiter:
+        statuses = get_rate_limit_status(_rate_limiter)
+        if any(s["status"] == "critical" for s in statuses.values()):
+            rate_limit_status = "critical"
+        elif any(s["status"] == "warning" for s in statuses.values()):
+            rate_limit_status = "warning"
+    
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "uptime": metrics["uptime_human"],
+        "topics_active": len(active_topics),
+        "total_ticks": total_ticks,
+        "ticks_per_minute": round(metrics["data_pipeline"]["ticks_per_minute"], 1),
+        "cache_hit_rate": metrics["cache"]["hit_rate"],
+        "rate_limit_status": rate_limit_status,
+        "grok_calls": metrics["grok_api"]["calls"],
+        "x_api_calls": metrics["x_api"]["calls"],
+    }
+
+
+__all__ = ["router", "set_dependencies", "set_rate_limiter"]
 

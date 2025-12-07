@@ -23,9 +23,9 @@ from adapter.x import XAdapter, XAdapterError
 from adapter.grok import GrokAdapter
 from adapter.models import Tick
 from aggregator import (
-    TickStore, BarGenerator, Bar, 
+    TickStore, BarStore, BarGenerator, Bar, 
     RESOLUTION_MAP, DEFAULT_RESOLUTION, MIN_RESOLUTION_SECONDS,
-    get_polling_window
+    get_polling_window, get_bar_boundaries
 )
 
 # Import monitoring (lazy to avoid circular imports)
@@ -98,6 +98,7 @@ class TopicManager:
         self,
         x_adapter: XAdapter,
         grok_adapter: GrokAdapter,
+        bar_store: Optional[BarStore] = None,
         default_resolution: str = DEFAULT_RESOLUTION
     ):
         self.x_adapter = x_adapter
@@ -107,7 +108,10 @@ class TopicManager:
         # Shared tick store for all topics
         self.tick_store = TickStore()
         
-        # Bar generator (uses tick store)
+        # Bar store for pre-computed bars (instant GET access)
+        self.bar_store = bar_store or BarStore()
+        
+        # Bar generator (uses tick store) - for on-demand fallback
         self.bar_generator = BarGenerator(grok_adapter, self.tick_store)
         
         # Topic configurations
@@ -171,8 +175,9 @@ class TopicManager:
         
         label = topic.label
         
-        # Clear ticks for this topic
+        # Clear ticks and bars for this topic
         self.tick_store.clear_topic(label)
+        self.bar_store.clear_topic(label)
         del self._topics[topic_id]
         
         logger.info(f"Removed topic: {topic_id}")
@@ -328,14 +333,14 @@ class TopicManager:
         """
         Get bars for a topic at the specified resolution.
         
-        Bars are generated ON-DEMAND from raw ticks.
-        Each bar gets its own fresh Grok summary.
+        Reads from BarStore (pre-computed bars) for instant response.
+        Falls back to on-demand generation if BarStore is empty.
         
         Args:
             topic_id: Topic ID
             resolution: Display resolution (default: topic's default)
             limit: Maximum bars to return
-            generate_summaries: Whether to generate Grok summaries
+            generate_summaries: Whether to generate Grok summaries (only for fallback)
         
         Returns:
             List of bars, most recent first
@@ -350,7 +355,14 @@ class TopicManager:
         if resolution not in RESOLUTION_MAP:
             raise ValueError(f"Invalid resolution: {resolution}")
         
-        # Generate bars on-demand from stored ticks
+        # Try to get from BarStore first (instant access)
+        bars = self.bar_store.get_bars(topic.label, resolution, limit)
+        
+        if bars:
+            return bars
+        
+        # Fallback: Generate on-demand (slower, but handles empty store)
+        logger.debug(f"BarStore empty for {topic.label}/{resolution}, generating on-demand")
         return self.bar_generator.generate_bars(
             topic=topic.label,
             resolution=resolution,
@@ -381,7 +393,7 @@ class TopicManager:
     ) -> List[Bar]:
         """
         Async version of get_bars.
-        Generates bars without blocking the event loop.
+        Reads from BarStore for instant access, falls back to async generation.
         """
         topic = self._topics.get(topic_id)
         if not topic:
@@ -393,7 +405,14 @@ class TopicManager:
         if resolution not in RESOLUTION_MAP:
             raise ValueError(f"Invalid resolution: {resolution}")
         
-        # Generate bars on-demand from stored ticks (async)
+        # Try to get from BarStore first (instant access)
+        bars = self.bar_store.get_bars(topic.label, resolution, limit)
+        
+        if bars:
+            return bars
+        
+        # Fallback: Generate on-demand (async, non-blocking)
+        logger.debug(f"BarStore empty for {topic.label}/{resolution}, generating on-demand (async)")
         return await self.bar_generator.generate_bars_async(
             topic=topic.label,
             resolution=resolution,
@@ -511,11 +530,211 @@ class TickPoller:
             await self._poll_all_topics()
 
 
+class BarScheduler:
+    """
+    Background service that generates bars periodically for all resolutions.
+    
+    Each resolution runs on its own schedule:
+    - 15s bars generated every 15 seconds
+    - 1m bars generated every minute
+    - 5m bars generated every 5 minutes
+    - etc.
+    
+    Bars are stored in BarStore for instant GET access.
+    """
+    
+    def __init__(
+        self,
+        topic_manager: TopicManager,
+        bar_store: BarStore,
+        bar_generator: BarGenerator,
+        resolutions: Optional[List[str]] = None
+    ):
+        """
+        Initialize BarScheduler.
+        
+        Args:
+            topic_manager: TopicManager to get topic list
+            bar_store: BarStore to save generated bars
+            bar_generator: BarGenerator to create bars from ticks
+            resolutions: List of resolutions to generate (default: all)
+        """
+        self.topic_manager = topic_manager
+        self.bar_store = bar_store
+        self.bar_generator = bar_generator
+        self.resolutions = resolutions or list(RESOLUTION_MAP.keys())
+        
+        self._running = False
+        self._tasks: Dict[str, asyncio.Task] = {}
+        self._last_generated: Dict[str, Dict[str, datetime]] = {}  # {topic: {resolution: last_time}}
+    
+    async def start(self):
+        """Start bar generation tasks for all resolutions."""
+        if self._running:
+            logger.warning("BarScheduler already running")
+            return
+        
+        self._running = True
+        
+        # Create a task for each resolution
+        for resolution in self.resolutions:
+            interval = RESOLUTION_MAP[resolution]
+            task = asyncio.create_task(self._generation_loop(resolution, interval))
+            self._tasks[resolution] = task
+            logger.info(f"BarScheduler started for {resolution} (every {interval}s)")
+        
+        # Generate initial bars for all topics immediately
+        await self._generate_initial_bars()
+    
+    async def stop(self):
+        """Stop all bar generation tasks."""
+        self._running = False
+        
+        for resolution, task in self._tasks.items():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        
+        self._tasks.clear()
+        logger.info("BarScheduler stopped")
+    
+    async def _generate_initial_bars(self):
+        """Generate initial set of bars for all topics (backfill)."""
+        topics = self.topic_manager.list_topics()
+        
+        for topic in topics:
+            if topic.status != TopicStatus.ACTIVE:
+                continue
+            
+            for resolution in self.resolutions:
+                try:
+                    # Generate last N bars for this resolution
+                    await self._generate_bars_for_topic(
+                        topic.label, 
+                        resolution, 
+                        limit=50,  # Initial backfill
+                        generate_summaries=False  # Skip Grok for backfill (fast)
+                    )
+                    logger.debug(f"Initial bars generated for {topic.label} at {resolution}")
+                except Exception as e:
+                    logger.error(f"Error generating initial bars for {topic.label}/{resolution}: {e}")
+    
+    async def _generation_loop(self, resolution: str, interval_seconds: int):
+        """
+        Generation loop for a specific resolution.
+        Runs every interval_seconds to generate the latest bar.
+        """
+        while self._running:
+            try:
+                # Wait until the next bar boundary
+                now = datetime.now(timezone.utc)
+                next_boundary = self._get_next_boundary(resolution, now)
+                wait_seconds = (next_boundary - now).total_seconds()
+                
+                if wait_seconds > 0:
+                    # Add small buffer (2s) to ensure bar window is complete
+                    await asyncio.sleep(wait_seconds + 2)
+                
+                # Generate bar for all active topics at this resolution
+                await self._generate_current_bar(resolution)
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in bar generation loop for {resolution}: {e}")
+                await asyncio.sleep(5)  # Backoff on error
+    
+    def _get_next_boundary(self, resolution: str, now: datetime) -> datetime:
+        """Get the next bar boundary time for a resolution."""
+        interval = RESOLUTION_MAP[resolution]
+        ts = now.timestamp()
+        next_ts = (int(ts // interval) + 1) * interval
+        return datetime.fromtimestamp(next_ts, tz=timezone.utc)
+    
+    async def _generate_current_bar(self, resolution: str):
+        """Generate the current (just-closed) bar for all topics."""
+        topics = self.topic_manager.list_topics()
+        active_topics = [t for t in topics if t.status == TopicStatus.ACTIVE]
+        
+        if not active_topics:
+            return
+        
+        # Get the just-closed bar boundaries
+        now = datetime.now(timezone.utc)
+        bar_start, bar_end = get_bar_boundaries(resolution, now - timedelta(seconds=1))
+        
+        for topic in active_topics:
+            try:
+                bar = await self.bar_generator.generate_bar_async(
+                    topic=topic.label,
+                    start=bar_start,
+                    end=bar_end,
+                    resolution=resolution,
+                    generate_summary=True  # Generate fresh Grok summary
+                )
+                await self.bar_store.add_bar(bar)
+                
+                logger.debug(
+                    f"Generated {resolution} bar for {topic.label}: "
+                    f"{bar.post_count} posts, summary={'yes' if bar.summary else 'no'}"
+                )
+                
+            except Exception as e:
+                logger.error(f"Error generating {resolution} bar for {topic.label}: {e}")
+    
+    async def _generate_bars_for_topic(
+        self, 
+        topic: str, 
+        resolution: str, 
+        limit: int = 50,
+        generate_summaries: bool = True
+    ):
+        """Generate multiple bars for a topic at a resolution."""
+        bars = await self.bar_generator.generate_bars_async(
+            topic=topic,
+            resolution=resolution,
+            limit=limit,
+            generate_summaries=generate_summaries
+        )
+        
+        for bar in bars:
+            await self.bar_store.add_bar(bar)
+    
+    async def regenerate_topic(self, topic_id: str, limit: int = 50, generate_summaries: bool = True):
+        """
+        Regenerate all bars for a topic (useful after adding new topic).
+        
+        Args:
+            topic_id: Topic ID to regenerate
+            limit: Number of historical bars to generate per resolution
+            generate_summaries: Whether to generate Grok summaries
+        """
+        topic = self.topic_manager.get_topic(topic_id)
+        if not topic:
+            logger.warning(f"Topic {topic_id} not found")
+            return
+        
+        for resolution in self.resolutions:
+            try:
+                await self._generate_bars_for_topic(
+                    topic.label,
+                    resolution,
+                    limit=limit,
+                    generate_summaries=generate_summaries
+                )
+                logger.info(f"Regenerated {resolution} bars for {topic.label}")
+            except Exception as e:
+                logger.error(f"Error regenerating {resolution} bars for {topic.label}: {e}")
+
+
 __all__ = [
     "Topic",
     "TopicStatus",
     "TopicManager",
     "TickPoller",
+    "BarScheduler",
     "RESOLUTION_MAP",
     "DEFAULT_RESOLUTION",
     "MIN_RESOLUTION_SECONDS",

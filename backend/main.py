@@ -17,9 +17,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from adapter.grok import GrokAdapter
 from adapter.rate_limiter import RateLimiter
 from adapter.x import XAdapter
-from aggregator import DigestService, MIN_RESOLUTION_SECONDS, DEFAULT_RESOLUTION
+from aggregator import DigestService, BarStore, MIN_RESOLUTION_SECONDS, DEFAULT_RESOLUTION
 from api import router, set_dependencies, set_rate_limiter
-from core import TickPoller, TopicManager
+from core import TickPoller, TopicManager, BarScheduler
 from database import init_db
 from monitoring import monitor, EventType
 
@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 # Global services (initialized on startup)
 topic_manager: TopicManager = None
 tick_poller: TickPoller = None
+bar_scheduler: BarScheduler = None
 digest_service: DigestService = None
 
 
@@ -91,7 +92,7 @@ async def lifespan(app: FastAPI):
     """
     Application lifespan - setup and teardown.
     """
-    global topic_manager, tick_poller, digest_service
+    global topic_manager, tick_poller, bar_scheduler, digest_service
 
     init_db()
 
@@ -118,12 +119,16 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("⚠ Grok Adapter not live - set XAI_API_KEY")
 
+    # Initialize BarStore for pre-computed bars
+    bar_store = BarStore(max_bars_per_resolution=500)
+
     # Initialize core services
-    # TopicManager stores raw ticks, bars are generated on-demand
+    # TopicManager reads from BarStore for instant GET access
     topic_manager = TopicManager(
         x_adapter=x_adapter, 
-        grok_adapter=grok_adapter, 
-        default_resolution=DEFAULT_RESOLUTION  # Default display resolution
+        grok_adapter=grok_adapter,
+        bar_store=bar_store,
+        default_resolution=DEFAULT_RESOLUTION
     )
 
     # Initialize digest service
@@ -131,13 +136,20 @@ async def lifespan(app: FastAPI):
 
     # Initialize poller
     # Default: polls at minimum resolution (15s) for granular tick collection
-    # Bars are generated on-demand at any resolution
     poll_interval_env = os.environ.get("POLL_INTERVAL")
     poll_interval = int(poll_interval_env) if poll_interval_env else MIN_RESOLUTION_SECONDS
     
     tick_poller = TickPoller(
         topic_manager=topic_manager,
         poll_interval=poll_interval,
+    )
+
+    # Initialize bar scheduler
+    # Generates bars periodically at each resolution and stores in BarStore
+    bar_scheduler = BarScheduler(
+        topic_manager=topic_manager,
+        bar_store=bar_store,
+        bar_generator=topic_manager.bar_generator,
     )
 
     # Set dependencies for API routes
@@ -157,16 +169,26 @@ async def lifespan(app: FastAPI):
     )
     monitor.set_component_status("database", "healthy", {"initialized": True})
 
-    # Start background poller
+    # Start background services
     auto_poll = os.environ.get("AUTO_POLL", "false").lower() == "true"
     if auto_poll:
+        # Start tick poller (collects raw ticks from X API)
         await tick_poller.start()
         monitor.set_component_status("poller", "healthy", {"interval": poll_interval})
-        logger.info(f"✓ Background poller started (interval: {poll_interval}s)")
-        logger.info(f"  Bars generated on-demand at any resolution: 15s, 30s, 1m, 5m, ...")
+        logger.info(f"✓ TickPoller started (interval: {poll_interval}s)")
+        
+        # Start bar scheduler (generates pre-computed bars periodically)
+        await bar_scheduler.start()
+        monitor.set_component_status("bar_scheduler", "healthy", {
+            "resolutions": bar_scheduler.resolutions
+        })
+        logger.info(f"✓ BarScheduler started for resolutions: {bar_scheduler.resolutions}")
+        logger.info("  Bars are pre-computed and stored for instant GET access")
     else:
         monitor.set_component_status("poller", "warning", {"enabled": False})
-        logger.info("ℹ Background poller disabled (set AUTO_POLL=true to enable)")
+        monitor.set_component_status("bar_scheduler", "warning", {"enabled": False})
+        logger.info("ℹ Background services disabled (set AUTO_POLL=true to enable)")
+        logger.info("  GET /bars will generate bars on-demand (slower)")
 
     # Log monitoring endpoints
     logger.info("📊 Monitoring available at /api/v1/monitor/*")
@@ -176,6 +198,8 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down X Terminal backend...")
+    if bar_scheduler:
+        await bar_scheduler.stop()
     if tick_poller:
         await tick_poller.stop()
     logger.info("Goodbye!")

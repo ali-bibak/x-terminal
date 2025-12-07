@@ -16,7 +16,9 @@
 </p>
 
 <p align="center">
-  <img src="docs/demo.png" width="900" alt="X Terminal Dashboard">
+  <a href="docs/demo.png">
+    <img src="docs/demo.png" alt="X Terminal Dashboard">
+  </a>
 </p>
 
 ---

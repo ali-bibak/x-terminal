@@ -1,6 +1,6 @@
 # X Terminal
 
-**A Bloomberg-style LiveOps dashboard for X (Twitter) powered by Grok**
+**A Bloomberg-style LiveOps dashboard for X powered by Grok**
 
 <p align="center">
   <img src="frontend/static/x-logo.svg" width="60" alt="X Logo">
@@ -66,7 +66,7 @@ This enables:
 x-terminal/
 ├── backend/                 # Python FastAPI backend
 │   ├── adapter/
-│   │   ├── x/              # X (Twitter) API adapter
+│   │   ├── x/              # X API adapter
 │   │   ├── grok/           # Grok AI adapter
 │   │   ├── models.py       # Shared Pydantic models (Tick)
 │   │   └── rate_limiter.py # Shared rate limiting

@@ -343,7 +343,13 @@ async def get_bars(
             detail=f"Invalid resolution: {resolution}. Valid options: {list(RESOLUTION_MAP.keys())}"
         )
     
-    bars = manager.get_bars(topic_id, limit=limit, resolution=resolution, generate_summaries=generate_summaries)
+    # Use async version to avoid blocking event loop during Grok calls
+    bars = await manager.get_bars_async(
+        topic_id, 
+        limit=limit, 
+        resolution=resolution, 
+        generate_summaries=generate_summaries
+    )
     return [BarResponse.from_bar(b) for b in bars]
 
 
@@ -365,7 +371,12 @@ async def get_latest_bar(
             detail=f"Invalid resolution: {resolution}. Valid options: {list(RESOLUTION_MAP.keys())}"
         )
     
-    bar = manager.get_latest_bar(topic_id, resolution=resolution, generate_summary=generate_summary)
+    # Use async version to avoid blocking event loop during Grok calls
+    bar = await manager.get_latest_bar_async(
+        topic_id, 
+        resolution=resolution, 
+        generate_summary=generate_summary
+    )
     if not bar:
         return None
     return BarResponse.from_bar(bar)
@@ -432,11 +443,11 @@ async def create_digest(
     if not topic:
         raise HTTPException(status_code=404, detail=f"Topic '{topic_id}' not found")
     
-    # Get bars from TopicManager (where they're actually stored)
-    bars = manager.get_bars(topic_id, limit=lookback_bars)
+    # Get bars from TopicManager (use async to avoid blocking)
+    bars = await manager.get_bars_async(topic_id, limit=lookback_bars, generate_summaries=True)
     
     try:
-        digest = digest_service.create_digest(
+        digest = await digest_service.create_digest_async(
             topic=topic.label,
             bars=bars,
             lookback_bars=lookback_bars

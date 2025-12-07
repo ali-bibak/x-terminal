@@ -15,6 +15,7 @@ This allows:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
@@ -361,6 +362,142 @@ class BarGenerator:
 
         return bars  # Already most recent first
 
+    # -------------------------------------------------------------------------
+    # Async versions (non-blocking)
+    # -------------------------------------------------------------------------
+
+    async def generate_bar_async(
+        self,
+        topic: str,
+        start: datetime,
+        end: datetime,
+        resolution: str,
+        generate_summary: bool = True
+    ) -> Bar:
+        """
+        Async version of generate_bar.
+        Uses async Grok calls to avoid blocking the event loop.
+        """
+        # Get ticks in this window (sync - fast in-memory operation)
+        ticks = self.tick_store.get_ticks(topic, start=start, end=end)
+        
+        # Aggregate metrics (sync - fast computation)
+        total_likes = sum(t.metrics.get("like_count", 0) for t in ticks)
+        total_retweets = sum(t.metrics.get("retweet_count", 0) for t in ticks)
+        total_replies = sum(t.metrics.get("reply_count", 0) for t in ticks)
+        total_quotes = sum(t.metrics.get("quote_count", 0) for t in ticks)
+        
+        # Sample post IDs (first 5)
+        sample_post_ids = [t.id for t in ticks[:5]]
+        
+        # Create bar
+        bar = Bar(
+            topic=topic,
+            resolution=resolution,
+            start=start,
+            end=end,
+            post_count=len(ticks),
+            total_likes=total_likes,
+            total_retweets=total_retweets,
+            total_replies=total_replies,
+            total_quotes=total_quotes,
+            sample_post_ids=sample_post_ids,
+        )
+        
+        # Generate fresh summary from ticks (ASYNC - non-blocking)
+        if generate_summary and ticks:
+            try:
+                bar.summary = await self.grok_adapter.summarize_bar_async(
+                    topic=topic,
+                    ticks=ticks,
+                    start_time=start,
+                    end_time=end
+                )
+            except Exception as e:
+                logger.error(f"Failed to generate bar summary: {e}")
+
+        # Record bar generation event
+        mon, EventType = self._get_monitor_and_event_type()
+        if mon and EventType:
+            mon.metrics.record_bar_generated()
+            mon.activity.add_event(
+                EventType.BAR_GENERATED,
+                topic=topic,
+                resolution=resolution,
+                post_count=len(ticks),
+                has_summary=bar.summary is not None,
+                time_window=f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}"
+            )
+
+        return bar
+
+    async def generate_bars_async(
+        self,
+        topic: str,
+        resolution: str = DEFAULT_RESOLUTION,
+        limit: int = 50,
+        generate_summaries: bool = True,
+        end_time: Optional[datetime] = None
+    ) -> List[Bar]:
+        """
+        Async version of generate_bars.
+        Generates bars concurrently using asyncio.gather for better performance.
+        """
+        if resolution not in RESOLUTION_MAP:
+            raise ValueError(f"Invalid resolution: {resolution}. Valid: {list(RESOLUTION_MAP.keys())}")
+        
+        resolution_seconds = RESOLUTION_MAP[resolution]
+        
+        # Determine time range
+        if end_time is None:
+            end_time = datetime.now(timezone.utc)
+        
+        # Floor end_time to resolution boundary
+        ts = end_time.timestamp()
+        bar_end_ts = int(ts // resolution_seconds) * resolution_seconds
+        bar_end = datetime.fromtimestamp(bar_end_ts, tz=timezone.utc)
+        
+        # Prepare bar time ranges
+        bar_ranges = []
+        current_end = bar_end
+        for _ in range(limit):
+            bar_start = current_end - timedelta(seconds=resolution_seconds)
+            bar_ranges.append((bar_start, current_end))
+            current_end = bar_start
+        
+        # Generate all bars concurrently
+        tasks = [
+            self.generate_bar_async(
+                topic=topic,
+                start=start,
+                end=end,
+                resolution=resolution,
+                generate_summary=generate_summaries
+            )
+            for start, end in bar_ranges
+        ]
+        
+        bars = await asyncio.gather(*tasks)
+        
+        # Record batch bar generation event
+        mon, EventType = self._get_monitor_and_event_type()
+        if mon and EventType and bars:
+            bars_with_summaries = sum(1 for bar in bars if bar.summary is not None)
+            total_posts = sum(bar.post_count for bar in bars)
+
+            mon.activity.add_event(
+                EventType.BAR_GENERATED,
+                topic=topic,
+                resolution=resolution,
+                bar_count=len(bars),
+                total_posts=total_posts,
+                bars_with_summaries=bars_with_summaries,
+                batch_generation=True,
+                async_mode=True
+            )
+
+        return list(bars)  # Already most recent first
+
 
 class DigestService:
     """
@@ -421,6 +558,49 @@ class DigestService:
                 lookback_hours=lookback_hours
             )
             logger.info(f"Generated digest for topic {topic} with {len(bars)} bars")
+            return digest
+        except Exception as e:
+            logger.error(f"Failed to generate digest for {topic}: {e}")
+            raise RuntimeError(f"Failed to generate digest for {topic}: {e}") from e
+
+    async def create_digest_async(self, topic: str, bars: List[Bar], lookback_bars: int = 12) -> TopicDigest:
+        """
+        Async version of create_digest.
+        Uses async Grok calls to avoid blocking the event loop.
+        """
+        # Limit bars to lookback count
+        bars = bars[:lookback_bars] if bars else []
+        
+        if not bars:
+            logger.warning(f"No bars found for topic {topic}")
+            return TopicDigest(
+                topic=topic,
+                generated_at=datetime.now(timezone.utc),
+                time_range="No data",
+                overall_summary=f"No recent activity to summarize for {topic}",
+                key_developments=[],
+                trending_elements=[],
+                sentiment_trend="stable",
+                recommendations=["Continue monitoring for activity"]
+            )
+        
+        # Calculate lookback hours from the bars
+        oldest_bar = min(bars, key=lambda b: b.start)
+        newest_bar = max(bars, key=lambda b: b.end)
+        time_diff = newest_bar.end - oldest_bar.start
+        lookback_hours = max(1, int(time_diff.total_seconds() / 3600))
+        
+        # Convert bars to dict format for GrokAdapter
+        bars_data = [bar.to_dict() for bar in bars]
+        
+        # Call Grok to generate digest (async - non-blocking)
+        try:
+            digest = await self.grok_adapter.create_topic_digest_async(
+                topic=topic,
+                bars_data=bars_data,
+                lookback_hours=lookback_hours
+            )
+            logger.info(f"Generated digest for topic {topic} with {len(bars)} bars (async)")
             return digest
         except Exception as e:
             logger.error(f"Failed to generate digest for {topic}: {e}")

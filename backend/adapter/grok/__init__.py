@@ -4,6 +4,7 @@ Typed helper wrapping Grok (xai-sdk) flows for the X Terminal backend.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -378,6 +379,45 @@ Provide contextual analysis of trends, developments, and recommendations for mon
 
         raise RuntimeError(f"Grok API call failed for create_topic_digest({topic}). No fallback available.")
 
+    # -------------------------------------------------------------------------
+    # Async versions (run blocking calls in thread pool)
+    # -------------------------------------------------------------------------
+
+    async def summarize_bar_async(
+        self, 
+        topic: str, 
+        ticks: List[Tick], 
+        start_time: datetime, 
+        end_time: datetime
+    ) -> BarSummary:
+        """
+        Async version of summarize_bar.
+        Runs the blocking xai-sdk call in a thread pool to avoid blocking the event loop.
+        """
+        return await asyncio.to_thread(
+            self.summarize_bar,
+            topic=topic,
+            ticks=ticks,
+            start_time=start_time,
+            end_time=end_time
+        )
+
+    async def create_topic_digest_async(
+        self, 
+        topic: str, 
+        bars_data: List[Dict[str, Any]], 
+        lookback_hours: int = 1
+    ) -> TopicDigest:
+        """
+        Async version of create_topic_digest.
+        Runs the blocking xai-sdk call in a thread pool to avoid blocking the event loop.
+        """
+        return await asyncio.to_thread(
+            self.create_topic_digest,
+            topic=topic,
+            bars_data=bars_data,
+            lookback_hours=lookback_hours
+        )
 
 
 __all__ = [

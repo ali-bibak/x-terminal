@@ -40,6 +40,8 @@ def mock_grok_adapter():
     """Create a mock Grok adapter."""
     adapter = Mock()
     adapter.is_live = True
+    
+    # Sync methods
     adapter.summarize_bar = Mock(return_value=BarSummary(
         summary="Test summary for the bar",
         key_themes=["theme1", "theme2"],
@@ -58,6 +60,27 @@ def mock_grok_adapter():
         sentiment_trend="improving",
         recommendations=["Monitor earnings reactions"]
     ))
+    
+    # Async methods (return same values as sync)
+    adapter.summarize_bar_async = AsyncMock(return_value=BarSummary(
+        summary="Test summary for the bar",
+        key_themes=["theme1", "theme2"],
+        sentiment=0.8,  # Positive
+        post_count=5,
+        engagement_level="high",
+        highlight_posts=["post1", "post2"]
+    ))
+    adapter.create_topic_digest_async = AsyncMock(return_value=TopicDigest(
+        topic="$TSLA",
+        generated_at=datetime.now(timezone.utc),
+        time_range="Last 1 hour",
+        overall_summary="Tesla had significant discussion today",
+        key_developments=["Earnings beat", "New product announced"],
+        trending_elements=["#Tesla", "@elonmusk"],
+        sentiment_trend="improving",
+        recommendations=["Monitor earnings reactions"]
+    ))
+    
     return adapter
 
 

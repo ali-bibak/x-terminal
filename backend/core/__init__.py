@@ -367,6 +367,54 @@ class TopicManager:
         """Get the most recent bar for a topic."""
         bars = self.get_bars(topic_id, resolution=resolution, limit=1, generate_summaries=generate_summary)
         return bars[0] if bars else None
+
+    # -------------------------------------------------------------------------
+    # Async versions (non-blocking)
+    # -------------------------------------------------------------------------
+
+    async def get_bars_async(
+        self,
+        topic_id: str,
+        resolution: Optional[str] = None,
+        limit: int = 50,
+        generate_summaries: bool = True
+    ) -> List[Bar]:
+        """
+        Async version of get_bars.
+        Generates bars without blocking the event loop.
+        """
+        topic = self._topics.get(topic_id)
+        if not topic:
+            return []
+        
+        # Use topic's default resolution if not specified
+        resolution = resolution or topic.resolution
+        
+        if resolution not in RESOLUTION_MAP:
+            raise ValueError(f"Invalid resolution: {resolution}")
+        
+        # Generate bars on-demand from stored ticks (async)
+        return await self.bar_generator.generate_bars_async(
+            topic=topic.label,
+            resolution=resolution,
+            limit=limit,
+            generate_summaries=generate_summaries
+        )
+
+    async def get_latest_bar_async(
+        self, 
+        topic_id: str, 
+        resolution: Optional[str] = None,
+        generate_summary: bool = True
+    ) -> Optional[Bar]:
+        """Async version: Get the most recent bar for a topic."""
+        bars = await self.get_bars_async(
+            topic_id, 
+            resolution=resolution, 
+            limit=1, 
+            generate_summaries=generate_summary
+        )
+        return bars[0] if bars else None
     
     def get_tick_count(self, topic_id: str) -> int:
         """Get raw tick count for a topic."""

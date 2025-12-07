@@ -253,10 +253,17 @@ class GrokAdapter:
             for tick in ticks[:10]  # Limit to first 10 posts for summary
         ])
 
-        time_range = f"{start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')}"
+        # Calculate how recent this window is
+        now = datetime.now(timezone.utc)
+        minutes_ago = int((now - end_time).total_seconds() / 60)
+        recency = f"{minutes_ago} minutes ago" if minutes_ago > 0 else "just now"
+        
+        # Format with date, time, and timezone
+        time_range = f"{start_time.strftime('%Y-%m-%d %H:%M')}-{end_time.strftime('%H:%M')} UTC"
 
         user_prompt = f"""Topic: {topic}
-Time Window: {time_range}
+Current time: {now.strftime('%Y-%m-%d %H:%M')} UTC
+Time Window: {time_range} ({recency})
 Posts ({len(ticks)} total):
 
 {posts_text}
@@ -325,16 +332,23 @@ Create a brief, structured summary focused on what happened in this specific tim
                 recommendations=["Continue monitoring for activity"]
             )
 
-        # Create a summary of the bars
+        # Get current time for context
+        now = datetime.now(timezone.utc)
+        
+        # Create a summary of the bars with cleaner time formatting
         bars_summary = "\n".join([
             f"Bar {i+1} ({bar.get('start', 'unknown')}): {bar.get('summary', 'No summary')} "
-            f"({bar.get('post_count', 0)} posts)"
-            for i, bar in enumerate(bars_data[-12:])  # Last 12 bars (assuming 5min bars = 1 hour)
+            f"({bar.get('post_count', 0)} posts, sentiment: {bar.get('sentiment', 'unknown')})"
+            for i, bar in enumerate(bars_data[-12:])  # Last 12 bars
         ])
+        
+        total_posts = sum(b.get("post_count", 0) for b in bars_data)
 
         user_prompt = f"""Topic: {topic}
+Current time: {now.strftime('%Y-%m-%d %H:%M')} UTC
 Time Period: Last {lookback_hours} hour(s)
-Bar Summaries ({len(bars_data)} total bars):
+Total posts across all bars: {total_posts}
+Bar Summaries ({len(bars_data)} total bars, most recent last):
 
 {bars_summary}"""
 

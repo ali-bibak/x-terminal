@@ -640,6 +640,52 @@ async def get_topics_status(manager: TopicManager = Depends(get_topic_manager)):
     }
 
 
+@router.get("/debug/ticks/{topic_id}", tags=["Debug"])
+async def get_tick_debug(
+    topic_id: str,
+    limit: int = Query(default=10, ge=1, le=100),
+    start: Optional[str] = Query(default=None, description="Start time ISO format"),
+    end: Optional[str] = Query(default=None, description="End time ISO format"),
+    manager: TopicManager = Depends(get_topic_manager)
+):
+    """Debug endpoint to inspect tick timestamps."""
+    from datetime import datetime, timezone
+    
+    topic = manager.get_topic(topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail=f"Topic '{topic_id}' not found")
+    
+    # Parse optional time filters
+    start_dt = datetime.fromisoformat(start.replace('Z', '+00:00')) if start else None
+    end_dt = datetime.fromisoformat(end.replace('Z', '+00:00')) if end else None
+    
+    # Get all ticks for this topic (with optional time filter)
+    ticks = manager.tick_store.get_ticks(topic.label, start=start_dt, end=end_dt)
+    time_range = manager.tick_store.get_time_range(topic.label)
+    
+    return {
+        "topic_id": topic_id,
+        "topic_label": topic.label,
+        "query_start": start,
+        "query_end": end,
+        "total_ticks_in_range": len(ticks),
+        "total_ticks_all": manager.tick_store.get_tick_count(topic.label),
+        "time_range": {
+            "oldest": time_range[0].isoformat() if time_range else None,
+            "newest": time_range[1].isoformat() if time_range else None,
+        },
+        "sample_ticks": [
+            {
+                "id": t.id,
+                "timestamp": t.timestamp.isoformat(),
+                "author": t.author,
+                "topic": t.topic,
+            }
+            for t in ticks[-limit:]  # Most recent ticks
+        ]
+    }
+
+
 @router.get("/monitor/live-stats", tags=["Monitoring"])
 async def get_live_stats(manager: TopicManager = Depends(get_topic_manager)):
     """

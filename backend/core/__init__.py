@@ -359,15 +359,33 @@ class TopicManager:
         bars = self.bar_store.get_bars(topic.label, resolution, limit)
         
         if bars:
+            # Check if we have meaningful cached data WITH summaries
+            bars_with_data = [b for b in bars if b.post_count > 0]
+            bars_with_summaries = [b for b in bars_with_data if b.summary is not None]
+            
+            if bars_with_summaries:
+                # Cache has bars with summaries - return immediately (FAST)
+                # Note: some recent bars may not have summaries yet (BarScheduler is async)
+                return bars
+            
+            # No summaries yet - check if ticks exist
+            tick_count = self.tick_store.get_tick_count(topic.label)
+            if tick_count == 0:
+                # No ticks yet - return cached empty bars (FAST)
+                return bars
+            
+            # Ticks exist but no summaries yet - return bars with post counts only (FAST)
+            # Summaries will be populated by BarScheduler on next run
+            logger.debug(f"BarStore has bars without summaries for {topic.label}/{resolution}, returning data-only bars")
             return bars
         
-        # Fallback: Generate on-demand (slower, but handles empty store)
-        logger.debug(f"BarStore empty for {topic.label}/{resolution}, generating on-demand")
+        # No cached bars - generate metrics only (no Grok calls for speed)
+        logger.debug(f"BarStore empty for {topic.label}/{resolution}, generating metrics-only bars")
         return self.bar_generator.generate_bars(
             topic=topic.label,
             resolution=resolution,
             limit=limit,
-            generate_summaries=generate_summaries
+            generate_summaries=False  # Summaries come from BarScheduler
         )
     
     def get_latest_bar(
@@ -409,15 +427,33 @@ class TopicManager:
         bars = self.bar_store.get_bars(topic.label, resolution, limit)
         
         if bars:
+            # Check if we have meaningful cached data WITH summaries
+            bars_with_data = [b for b in bars if b.post_count > 0]
+            bars_with_summaries = [b for b in bars_with_data if b.summary is not None]
+            
+            if bars_with_summaries:
+                # Cache has bars with summaries - return immediately (FAST)
+                # Note: some recent bars may not have summaries yet (BarScheduler is async)
+                return bars
+            
+            # No summaries yet - check if ticks exist
+            tick_count = self.tick_store.get_tick_count(topic.label)
+            if tick_count == 0:
+                # No ticks yet - return cached empty bars (FAST)
+                return bars
+            
+            # Ticks exist but no summaries yet - return bars with post counts only (FAST)
+            # Summaries will be populated by BarScheduler on next run
+            logger.debug(f"BarStore has bars without summaries for {topic.label}/{resolution}, returning data-only bars")
             return bars
         
-        # Fallback: Generate on-demand (async, non-blocking)
-        logger.debug(f"BarStore empty for {topic.label}/{resolution}, generating on-demand (async)")
+        # No cached bars - generate metrics only (no Grok calls for speed)
+        logger.debug(f"BarStore empty for {topic.label}/{resolution}, generating metrics-only bars (async)")
         return await self.bar_generator.generate_bars_async(
             topic=topic.label,
             resolution=resolution,
             limit=limit,
-            generate_summaries=generate_summaries
+            generate_summaries=False  # Summaries come from BarScheduler
         )
 
     async def get_latest_bar_async(
@@ -654,19 +690,37 @@ class BarScheduler:
         return datetime.fromtimestamp(next_ts, tz=timezone.utc)
     
     async def _generate_current_bar(self, resolution: str):
-        """Generate the current (just-closed) bar for all topics."""
+        """Generate bars for all topics based on tick data."""
         topics = self.topic_manager.list_topics()
         active_topics = [t for t in topics if t.status == TopicStatus.ACTIVE]
         
         if not active_topics:
             return
         
-        # Get the just-closed bar boundaries
-        now = datetime.now(timezone.utc)
-        bar_start, bar_end = get_bar_boundaries(resolution, now - timedelta(seconds=1))
+        resolution_seconds = RESOLUTION_MAP[resolution]
         
         for topic in active_topics:
             try:
+                # Get tick time range for this topic
+                tick_range = self.topic_manager.tick_store.get_time_range(topic.label)
+                if not tick_range:
+                    continue
+                
+                oldest_tick, newest_tick = tick_range
+                
+                # Generate bars for time windows that have tick data
+                # Start from the newest complete bar window
+                bar_end_ts = int(newest_tick.timestamp() // resolution_seconds) * resolution_seconds
+                bar_end = datetime.fromtimestamp(bar_end_ts, tz=timezone.utc)
+                bar_start = bar_end - timedelta(seconds=resolution_seconds)
+                
+                # Check if this bar already exists in store
+                existing = self.bar_store.get_latest_bar(topic.label, resolution)
+                if existing and existing.start >= bar_start:
+                    # Already have this bar or newer
+                    continue
+                
+                # Generate the bar
                 bar = await self.bar_generator.generate_bar_async(
                     topic=topic.label,
                     start=bar_start,
@@ -676,9 +730,10 @@ class BarScheduler:
                 )
                 await self.bar_store.add_bar(bar)
                 
-                logger.debug(
-                    f"Generated {resolution} bar for {topic.label}: "
-                    f"{bar.post_count} posts, summary={'yes' if bar.summary else 'no'}"
+                logger.info(
+                    f"BarScheduler generated {resolution} bar for {topic.label}: "
+                    f"{bar_start.strftime('%H:%M:%S')}-{bar_end.strftime('%H:%M:%S')} "
+                    f"({bar.post_count} posts, summary={'yes' if bar.summary else 'no'})"
                 )
                 
             except Exception as e:

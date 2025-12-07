@@ -66,7 +66,7 @@ class RateLimiter:
         Wait if the rate limit would be exceeded for the given category.
 
         Args:
-            category: Rate limit category (e.g., "x_search", "x_user", "grok_fast", "grok_careful")
+            category: Rate limit category (e.g., "x_search", "x_user", "grok_fast", "grok_reasoning")
         """
         if category not in self.configs:
             logger.warning(f"No rate limit configured for category '{category}', allowing request")
@@ -240,8 +240,8 @@ def create_grok_api_limiter() -> RateLimiter:
         strategy="sliding_window"
     ))
 
-    # Careful model: lower rate limit for complex reasoning
-    limiter.configure_limit("grok_careful", RateLimitConfig(
+    # reasoning model: lower rate limit for complex reasoning
+    limiter.configure_limit("grok_reasoning", RateLimitConfig(
         requests_per_window=30,
         window_seconds=60,
         strategy="sliding_window"
@@ -261,7 +261,7 @@ def create_shared_limiter() -> RateLimiter:
 
     # Grok API limits
     limiter.configure_limit("grok_fast", RateLimitConfig(60, 60, "sliding_window"))
-    limiter.configure_limit("grok_careful", RateLimitConfig(30, 60, "sliding_window"))
+    limiter.configure_limit("grok_reasoning", RateLimitConfig(30, 60, "sliding_window"))
 
     return limiter
 

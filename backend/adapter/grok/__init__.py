@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 
 from dotenv import load_dotenv, find_dotenv
@@ -125,7 +125,7 @@ class GrokAdapter:
 
         try:
             # Apply rate limiting with appropriate category
-            category = "grok_careful" if model == self.reasoning_model else "grok_fast"
+            category = "grok_reasoning" if model == self.reasoning_model else "grok_fast"
             self.rate_limiter.wait_if_needed(category)
 
             logger.debug(f"Making API call to model {model} with rate limit category {category}")
@@ -251,12 +251,12 @@ Create a brief, structured summary focused on what happened in this specific tim
     def create_topic_digest(self, topic: str, bars_data: List[Dict[str, Any]], lookback_hours: int = 1) -> TopicDigest:
         """
         Create a digest over multiple bars for a topic.
-        Uses careful model for higher-quality analysis.
+        Uses reasoning model for higher-quality analysis.
         """
         if not bars_data:
             return TopicDigest(
                 topic=topic,
-                generated_at=datetime.utcnow(),
+                generated_at=datetime.now(timezone.utc),
                 time_range=f"Last {lookback_hours} hour(s)",
                 overall_summary="No recent activity to summarize",
                 key_developments=[],

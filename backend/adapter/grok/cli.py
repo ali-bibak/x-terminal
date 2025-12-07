@@ -85,9 +85,9 @@ def main() -> None:
                     if i + 1 < len(parts):
                         posts.append({"author": parts[i].strip(), "text": parts[i+1].strip()})
 
-            from datetime import datetime, timedelta
-            start_time = datetime.utcnow() - timedelta(minutes=5)
-            end_time = datetime.utcnow()
+            from datetime import datetime, timedelta, timezone
+            start_time = datetime.now(timezone.utc) - timedelta(minutes=5)
+            end_time = datetime.now(timezone.utc)
 
             summary = adapter.summarize_bar(topic, posts, start_time, end_time)
             _print(summary.model_dump())

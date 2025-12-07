@@ -6,7 +6,7 @@ These are separated from the main adapter to avoid using fake data in production
 from __future__ import annotations
 
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any
 
 from . import IntelSummary, MonitorInsight, FactCheckReport, DigestOverview, BarSummary, TopicDigest
@@ -82,7 +82,7 @@ def mock_digest_overview(highlights: List[str]) -> DigestOverview:
         "Schedule a digest push to the leadership chat.",
     ]
     return DigestOverview(
-        generated_at=datetime.utcnow(),
+        generated_at=datetime.now(timezone.utc),
         highlights=base[:4],
         risk_outlook="Moderate risk. Sentiment is noisy but nothing is on fire.",
         recommended_actions=recommended,
@@ -137,7 +137,7 @@ def mock_topic_digest(topic: str, bars_data: List[Dict[str, Any]], lookback_hour
     if total_posts == 0:
         return TopicDigest(
             topic=topic,
-            generated_at=datetime.utcnow(),
+            generated_at=datetime.now(timezone.utc),
             time_range=time_range,
             overall_summary=f"No significant activity for {topic} in the last {lookback_hours} hour(s)",
             key_developments=[],
@@ -172,7 +172,7 @@ def mock_topic_digest(topic: str, bars_data: List[Dict[str, Any]], lookback_hour
 
     return TopicDigest(
         topic=topic,
-        generated_at=datetime.utcnow(),
+        generated_at=datetime.now(timezone.utc),
         time_range=time_range,
         overall_summary=overall_summary,
         key_developments=developments,

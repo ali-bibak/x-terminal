@@ -1,7 +1,7 @@
 """Unit tests for GrokAdapter."""
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 from adapter.grok import (
@@ -104,7 +104,7 @@ class TestGrokAdapter:
 
     def test_mock_bar_summary_empty_posts(self):
         """Test mock bar summary with no posts."""
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
         end_time = start_time + timedelta(minutes=5)
 
         summary = mock_bar_summary("test_topic", [], start_time, end_time)
@@ -119,7 +119,7 @@ class TestGrokAdapter:
             {"author": "user1", "text": "Great news!"},
             {"author": "user2", "text": "Interesting development"}
         ]
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
         end_time = start_time + timedelta(minutes=5)
 
         summary = mock_bar_summary("test_topic", posts, start_time, end_time)
@@ -157,7 +157,7 @@ class TestGrokAdapter:
     def test_summarize_bar_empty_posts(self):
         """Test summarize_bar with empty posts list."""
         adapter = GrokAdapter()
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
         end_time = start_time + timedelta(minutes=5)
 
         summary = adapter.summarize_bar("test_topic", [], start_time, end_time)
@@ -188,7 +188,7 @@ class TestGrokAdapter:
         with patch.dict('os.environ', {'XAI_API_KEY': 'test_key'}):
             adapter = GrokAdapter()
             posts = [{"author": "user1", "text": "Test post"}]
-            start_time = datetime.utcnow()
+            start_time = datetime.now(timezone.utc)
             end_time = start_time + timedelta(minutes=5)
 
             result = adapter.summarize_bar("test_topic", posts, start_time, end_time)
@@ -207,7 +207,7 @@ class TestGrokAdapter:
 
         expected_digest = TopicDigest(
             topic="test_topic",
-            generated_at=datetime.utcnow(),
+            generated_at=datetime.now(timezone.utc),
             time_range="Last 1 hour(s)",
             overall_summary="Test summary",
             key_developments=["dev1", "dev2"],

@@ -3,13 +3,7 @@
     data?: number[]; // Sentiment values from -1 (negative) to 1 (positive)
   }
 
-  let {
-    data = [
-      0.2, 0.3, 0.5, 0.4, 0.3, 0.1, -0.1, 0.0, 0.2, 0.4, 0.5, 0.6, 0.7, 0.8,
-      0.7, 0.6, 0.5, 0.4, 0.3, 0.4, 0.5, 0.6, 0.7, 0.6, 0.5, 0.3, 0.4, 0.6, 0.7,
-      0.8,
-    ],
-  }: Props = $props();
+  let { data = [] }: Props = $props();
 
   const width = 400;
   const height = 20;

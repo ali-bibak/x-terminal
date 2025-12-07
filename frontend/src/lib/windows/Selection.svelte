@@ -1,33 +1,60 @@
 <script lang="ts">
-  import TopicSelection from "$lib/items/TopicSelection.svelte";
+  import CreateTopicPopover from "$lib/components/CreateTopicPopover.svelte";
   import { Search } from "lucide-svelte";
+  import type { TopicResponse } from "$lib/types";
+  import { onMount } from "svelte";
+  import api from "$lib/api";
+  import TopicSelection from "$lib/items/TopicSelection.svelte";
 
   interface Props {
-    onNavigate?: (topic: string) => void;
+    onNavigate?: (topic: string, id: string) => void;
   }
 
   let { onNavigate }: Props = $props();
+  let isPopoverOpen = $state(false);
+
+  let topics: TopicResponse[] = $state([]);
+
+  async function updateTopics() {
+    topics = await api.listTopics();
+  }
+
+  onMount(() => {
+    updateTopics();
+  });
 </script>
 
-<div class="relative">
-  <Search
-    class="absolute left-4 top-1/2 -translate-y-1/2 text-stone-400"
-    size={20}
-  />
-  <input
-    type="text"
-    placeholder="Search..."
-    class="w-full pl-12 pr-4 py-2 border border-stone-800 rounded-full focus:outline-none focus:border-blue-400"
-  />
+<CreateTopicPopover bind:isOpen={isPopoverOpen} />
+
+<div class="flex flex-row items-center gap-x-2">
+  <div class="relative flex-1">
+    <Search
+      class="absolute left-4 top-1/2 -translate-y-1/2 text-stone-400"
+      size={20}
+    />
+    <input
+      type="text"
+      placeholder="Search..."
+      class="w-full pl-12 pr-4 py-2 border border-stone-800 rounded-full focus:outline-none focus:border-blue-400"
+    />
+  </div>
+  <button
+    onclick={() => (isPopoverOpen = true)}
+    class="px-4 py-2 bg-blue-400 hover:bg-blue-400/80 text-white rounded-full font-bold"
+  >
+    Create Topic
+  </button>
 </div>
 
 <h1 class="font-bold text-xl mt-4">Subscribed</h1>
 <div class="mt-2 -mx-4">
-  <TopicSelection
-    title="California Earthquake"
-    tweetCount={59300}
-    onclick={() => onNavigate?.("California Earthquake")}
-  />
+  {#each topics as topic}
+    <TopicSelection
+      title={topic.label}
+      tweetCount={topic.tick_count}
+      onclick={() => onNavigate?.(topic.label, topic.id)}
+    />
+  {/each}
 </div>
 
 <h1 class="font-bold text-xl mt-4">In Palo Alto, California</h1>

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { FactCheckStatus } from "$lib/types";
+  import { formatRelativeTime } from "$lib/utils/time";
   import { Check, X } from "lucide-svelte";
 
   interface Props {
@@ -10,11 +11,13 @@
   }
 
   let {
-    timestamp = "Just now",
+    timestamp = new Date().toISOString(),
     content,
     isLast = false,
-    factCheckedByGrok = "CHECKED",
+    factCheckedByGrok = "NOT_CHECKED",
   }: Props = $props();
+
+  let formattedTime = $derived(formatRelativeTime(timestamp));
 </script>
 
 <div class="flex gap-x-4">
@@ -28,14 +31,14 @@
   </div>
 
   <div class="flex-1">
-    <p class="text-stone-400 text-sm mb-1">{timestamp}</p>
+    <p class="text-stone-400 text-sm mb-1">{formattedTime}</p>
     <p>{content}</p>
-    {#if true}
+    {#if factCheckedByGrok === "FALSE"}
       <div class="text-red-400 text-sm mb-1 flex flex-row items-center">
         <X class="h-4" />
         Deemed false by Grok: Some explanation
       </div>
-    {:else}
+    {:else if factCheckedByGrok === "CHECKED"}
       <div class="text-stone-400 text-sm mb-1 flex flex-row items-center">
         <Check class="h-4" />
         Fact checked by Grok

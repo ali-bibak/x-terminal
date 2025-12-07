@@ -48,7 +48,7 @@
     getTopicInfo();
     getBarsInfo();
 
-    const free = setInterval(getLatestBars, 10000);
+    const free = setInterval(getLatestBars, 7500);
 
     return () => {
       clearInterval(free);

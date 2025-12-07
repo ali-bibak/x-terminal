@@ -9,13 +9,13 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 
-from dotenv import load_dotenv, find_dotenv
+from dotenv import find_dotenv, load_dotenv
 from pydantic import BaseModel, Field
 
-from ..rate_limiter import RateLimiter, shared_limiter
 from ..models import Tick
+from ..rate_limiter import RateLimiter, shared_limiter
 
 load_dotenv(find_dotenv(usecwd=True))
 
@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 try:
     from xai_sdk import Client
     from xai_sdk.chat import system, user
+
     XAI_SDK_AVAILABLE = True
 except ImportError:  # xai-sdk might not be installed in local dev
     Client = None  # type: ignore[assignment]
@@ -70,24 +71,36 @@ class DigestOverview(BaseModel):
 # X Terminal specific models
 class BarSummary(BaseModel):
     """Summary for a time-barred window of posts."""
-    summary: str = Field(description="Brief summary of what happened in this time window")
+
+    summary: str = Field(
+        description="Brief summary of what happened in this time window"
+    )
     key_themes: List[str] = Field(description="Main topics or themes discussed")
-    sentiment: float = Field(description="Sentiment score from 0.0 (very negative) to 1.0 (very positive), with 0.5 being neutral")
+    sentiment: float = Field(
+        description="Sentiment score from 0.0 (very negative) to 1.0 (very positive), with 0.5 being neutral"
+    )
     post_count: int = Field(description="Number of posts in this bar")
     engagement_level: str = Field(description="low/medium/high engagement level")
-    highlight_posts: Optional[List[str]] = Field(default=None, description="IDs of 1-2 highlight posts")
+    highlight_posts: Optional[List[str]] = Field(
+        default=None, description="IDs of 1-2 highlight posts"
+    )
 
 
 class TopicDigest(BaseModel):
     """Digest over multiple bars for a topic."""
+
     topic: str = Field(description="Topic name")
     generated_at: datetime = Field(description="When this digest was generated")
     time_range: str = Field(description="Time period covered by this digest")
-    overall_summary: str = Field(description="High-level summary of the topic's activity")
+    overall_summary: str = Field(
+        description="High-level summary of the topic's activity"
+    )
     key_developments: List[str] = Field(description="Major developments or changes")
     trending_elements: List[str] = Field(description="What's gaining traction")
     sentiment_trend: str = Field(description="How sentiment has evolved")
-    recommendations: List[str] = Field(description="Suggested actions or monitoring points")
+    recommendations: List[str] = Field(
+        description="Suggested actions or monitoring points"
+    )
 
 
 class GrokAdapter:
@@ -97,8 +110,12 @@ class GrokAdapter:
 
     def __init__(self, rate_limiter: Optional[RateLimiter] = None) -> None:
         self.api_key = os.getenv("XAI_API_KEY")
-        self.fast_model = os.getenv("GROK_MODEL_FAST", "grok-4-1-fast")  # Updated to current fast model
-        self.reasoning_model = os.getenv("GROK_MODEL_REASONING", "grok-4-1-fast-reasoning")  # Updated to current model
+        self.fast_model = os.getenv(
+            "GROK_MODEL_FAST", "grok-4-1-fast"
+        )  # Updated to current fast model
+        self.reasoning_model = os.getenv(
+            "GROK_MODEL_REASONING", "grok-4-1-fast-reasoning"
+        )  # Updated to current model
         self._client: Optional[Client] = None  # type: ignore[type-arg]
         self.rate_limiter = rate_limiter or shared_limiter
 
@@ -110,14 +127,23 @@ class GrokAdapter:
                 logger.warning(f"Failed to initialize xAI client: {e}")
                 self._client = None
         else:
-            logger.warning("GrokAdapter initialized without API client (using fallbacks)")
+            logger.warning(
+                "GrokAdapter initialized without API client (using fallbacks)"
+            )
             self._client = None
 
     @property
     def is_live(self) -> bool:
         return self._client is not None
 
-    def _structured_call(self, *, model: str, system_prompt: str, user_prompt: str, schema: type[BaseModel]) -> Optional[BaseModel]:
+    def _structured_call(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        schema: type[BaseModel],
+    ) -> Optional[BaseModel]:
         """
         Perform a structured chat call via xai-sdk if available.
         Includes rate limiting and proper error handling.
@@ -128,10 +154,14 @@ class GrokAdapter:
 
         try:
             # Apply rate limiting with appropriate category
-            category = "grok_reasoning" if model == self.reasoning_model else "grok_fast"
+            category = (
+                "grok_reasoning" if model == self.reasoning_model else "grok_fast"
+            )
             self.rate_limiter.wait_if_needed(category)
 
-            logger.debug(f"Making API call to model {model} with rate limit category {category}")
+            logger.debug(
+                f"Making API call to model {model} with rate limit category {category}"
+            )
 
             # Try the current API pattern first
             try:
@@ -166,7 +196,9 @@ class GrokAdapter:
         )
         if isinstance(payload, IntelSummary):
             return payload
-        raise RuntimeError(f"Grok API call failed for summarize_user({handle}). No fallback available.")
+        raise RuntimeError(
+            f"Grok API call failed for summarize_user({handle}). No fallback available."
+        )
 
     def monitor_topic(self, topic: str) -> MonitorInsight:
         payload = self._structured_call(
@@ -177,7 +209,9 @@ class GrokAdapter:
         )
         if isinstance(payload, MonitorInsight):
             return payload
-        raise RuntimeError(f"Grok API call failed for monitor_topic({topic}). No fallback available.")
+        raise RuntimeError(
+            f"Grok API call failed for monitor_topic({topic}). No fallback available."
+        )
 
     def fact_check(self, url: str, text: str) -> FactCheckReport:
         payload = self._structured_call(
@@ -188,7 +222,9 @@ class GrokAdapter:
         )
         if isinstance(payload, FactCheckReport):
             return payload
-        raise RuntimeError(f"Grok API call failed for fact_check({url}). No fallback available.")
+        raise RuntimeError(
+            f"Grok API call failed for fact_check({url}). No fallback available."
+        )
 
     def digest(self, highlights: List[str]) -> DigestOverview:
         prompt = "\n".join(f"- {item}" for item in highlights) or "No highlights yet."
@@ -206,17 +242,19 @@ class GrokAdapter:
     # X Terminal specific methods
     # ---------------------------------------------------------------------
 
-    def summarize_bar(self, topic: str, ticks: List[Tick], start_time: datetime, end_time: datetime) -> BarSummary:
+    def summarize_bar(
+        self, topic: str, ticks: List[Tick], start_time: datetime, end_time: datetime
+    ) -> BarSummary:
         """
         Generate a summary for a time-barred window of posts.
         Uses fast model for quick, structured summaries.
-        
+
         Args:
             topic: Topic name
             ticks: List of Tick objects
             start_time: Start of the time window
             end_time: End of the time window
-        
+
         Returns:
             BarSummary with sentiment as float (0.0-1.0) and highlight_posts
         """
@@ -227,17 +265,19 @@ class GrokAdapter:
                 sentiment=0.5,  # Neutral
                 post_count=0,
                 engagement_level="low",
-                highlight_posts=[]
+                highlight_posts=[],
             )
 
         # Select highlight posts (top 1-2 by engagement)
         highlight_posts = self._select_highlight_posts(ticks)
 
         # Create a readable representation of the posts
-        posts_text = "\n".join([
-            f"@{tick.author}: {tick.text[:200]}..."
-            for tick in ticks[:10]  # Limit to first 10 posts for summary
-        ])
+        posts_text = "\n".join(
+            [
+                f"@{tick.author}: {tick.text[:200]}..."
+                for tick in ticks[:10]  # Limit to first 10 posts for summary
+            ]
+        )
 
         time_range = f"{start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')}"
 
@@ -264,7 +304,9 @@ Identify and EXCLUDE these from your summary:
 - Obvious pump-and-dump shills
 - "DM me" or follow-bait posts
 
-Your summary should focus ONLY on legitimate content. If most posts are spam, say "Limited legitimate discussion" and summarize what little real content exists.
+Your summary should focus ONLY on legitimate content. Only include posts that are not spam or scams. If there are no posts that are not spam or scams, say nothing, and return an empty output.
+
+If there are spam, do not mention it at all. Again, say nothing if no legitimate posts exist.
 
 SENTIMENT SCORING (based on NON-SPAM content only):
 - 0.0-0.2: Very negative (panic, crashes, scams exposed, major bad news)
@@ -294,38 +336,40 @@ HIGHLIGHT_POSTS should be from legitimate content only, not spam.""",
             payload.highlight_posts = highlight_posts
             return payload
 
-        raise RuntimeError(f"Grok API call failed for summarize_bar({topic}). No fallback available.")
-    
+        raise RuntimeError(
+            f"Grok API call failed for summarize_bar({topic}). No fallback available."
+        )
+
     def _select_highlight_posts(self, ticks: List[Tick]) -> List[str]:
         """
         Select 1-2 highlight posts based on engagement and recency.
-        
+
         Returns:
             List of post IDs (1-2 highlights)
         """
         if not ticks:
             return []
-        
+
         def calculate_engagement(tick: Tick) -> int:
             metrics = tick.metrics or {}
             return (
-                metrics.get("like_count", 0) * 3 +
-                metrics.get("retweet_count", 0) * 5 +
-                metrics.get("reply_count", 0) * 2 +
-                metrics.get("quote_count", 0) * 4
+                metrics.get("like_count", 0) * 3
+                + metrics.get("retweet_count", 0) * 5
+                + metrics.get("reply_count", 0) * 2
+                + metrics.get("quote_count", 0) * 4
             )
-        
+
         # Sort by engagement (desc), then by recency (desc)
         sorted_ticks = sorted(
-            ticks,
-            key=lambda t: (calculate_engagement(t), t.timestamp),
-            reverse=True
+            ticks, key=lambda t: (calculate_engagement(t), t.timestamp), reverse=True
         )
 
         # Return IDs of top 1-2 posts
         return [tick.id for tick in sorted_ticks[:2]]
 
-    def create_topic_digest(self, topic: str, bars_data: List[Dict[str, Any]], lookback_hours: int = 1) -> TopicDigest:
+    def create_topic_digest(
+        self, topic: str, bars_data: List[Dict[str, Any]], lookback_hours: int = 1
+    ) -> TopicDigest:
         """
         Create a digest over multiple bars for a topic.
         Uses reasoning model for higher-quality analysis.
@@ -339,15 +383,19 @@ HIGHLIGHT_POSTS should be from legitimate content only, not spam.""",
                 key_developments=[],
                 trending_elements=[],
                 sentiment_trend="stable",
-                recommendations=["Continue monitoring for activity"]
+                recommendations=["Continue monitoring for activity"],
             )
 
         # Create a summary of the bars
-        bars_summary = "\n".join([
-            f"Bar {i+1} ({bar.get('start', 'unknown')}): {bar.get('summary', 'No summary')} "
-            f"({bar.get('post_count', 0)} posts)"
-            for i, bar in enumerate(bars_data[-12:])  # Last 12 bars (assuming 5min bars = 1 hour)
-        ])
+        bars_summary = "\n".join(
+            [
+                f"Bar {i + 1} ({bar.get('start', 'unknown')}): {bar.get('summary', 'No summary')} "
+                f"({bar.get('post_count', 0)} posts)"
+                for i, bar in enumerate(
+                    bars_data[-12:]
+                )  # Last 12 bars (assuming 5min bars = 1 hour)
+            ]
+        )
 
         user_prompt = f"""Topic: {topic}
 Time Period: Last {lookback_hours} hour(s)
@@ -366,18 +414,16 @@ Provide contextual analysis of trends, developments, and recommendations for mon
         if isinstance(payload, TopicDigest):
             return payload
 
-        raise RuntimeError(f"Grok API call failed for create_topic_digest({topic}). No fallback available.")
+        raise RuntimeError(
+            f"Grok API call failed for create_topic_digest({topic}). No fallback available."
+        )
 
     # -------------------------------------------------------------------------
     # Async versions (run blocking calls in thread pool)
     # -------------------------------------------------------------------------
 
     async def summarize_bar_async(
-        self, 
-        topic: str, 
-        ticks: List[Tick], 
-        start_time: datetime, 
-        end_time: datetime
+        self, topic: str, ticks: List[Tick], start_time: datetime, end_time: datetime
     ) -> BarSummary:
         """
         Async version of summarize_bar.
@@ -388,14 +434,11 @@ Provide contextual analysis of trends, developments, and recommendations for mon
             topic=topic,
             ticks=ticks,
             start_time=start_time,
-            end_time=end_time
+            end_time=end_time,
         )
 
     async def create_topic_digest_async(
-        self, 
-        topic: str, 
-        bars_data: List[Dict[str, Any]], 
-        lookback_hours: int = 1
+        self, topic: str, bars_data: List[Dict[str, Any]], lookback_hours: int = 1
     ) -> TopicDigest:
         """
         Async version of create_topic_digest.
@@ -405,7 +448,7 @@ Provide contextual analysis of trends, developments, and recommendations for mon
             self.create_topic_digest,
             topic=topic,
             bars_data=bars_data,
-            lookback_hours=lookback_hours
+            lookback_hours=lookback_hours,
         )
 
 
@@ -416,6 +459,5 @@ __all__ = [
     "FactCheckReport",
     "DigestOverview",
     "BarSummary",
-    "TopicDigest"
+    "TopicDigest",
 ]
-

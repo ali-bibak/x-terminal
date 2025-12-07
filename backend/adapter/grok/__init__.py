@@ -17,19 +17,6 @@ from pydantic import BaseModel, Field
 from ..rate_limiter import RateLimiter, shared_limiter
 from ..models import Tick
 
-# Import monitoring (lazy to avoid circular imports)
-_monitor = None
-
-def _get_monitor():
-    global _monitor
-    if _monitor is None:
-        try:
-            from monitoring import monitor
-            _monitor = monitor
-        except ImportError:
-            _monitor = None
-    return _monitor
-
 load_dotenv(find_dotenv(usecwd=True))
 
 # Configure logging
@@ -59,6 +46,13 @@ class IntelSummary(BaseModel):
     recent_activity: List[str] = Field(description="Bullet list of recent actions")
 
 
+class MonitorInsight(BaseModel):
+    topic: str = Field(description="Topic being monitored")
+    headline: str = Field(description="One-line headline for the latest pulse")
+    impact_score: int = Field(description="0-100 subjective impact score", ge=0, le=100)
+    tags: List[str] = Field(description="Tags that categorize the event")
+
+
 class FactCheckReport(BaseModel):
     url: str = Field(description="URL that was fact checked")
     verdict: str = Field(description="true / false / unclear verdict")
@@ -81,7 +75,7 @@ class BarSummary(BaseModel):
     sentiment: float = Field(description="Sentiment score from 0.0 (very negative) to 1.0 (very positive), with 0.5 being neutral")
     post_count: int = Field(description="Number of posts in this bar")
     engagement_level: str = Field(description="low/medium/high engagement level")
-    highlight_posts: Optional[List[str]] = Field(default=None, description="1-2 most representative post IDs from this bar")
+    highlight_posts: Optional[List[str]] = Field(default=None, description="IDs of 1-2 highlight posts")
 
 
 class TopicDigest(BaseModel):
@@ -132,8 +126,6 @@ class GrokAdapter:
             logger.debug("No client available, returning None")
             return None
 
-        start_time_ms = time.time() * 1000
-        
         try:
             # Apply rate limiting with appropriate category
             category = "grok_reasoning" if model == self.reasoning_model else "grok_fast"
@@ -147,22 +139,7 @@ class GrokAdapter:
                 chat.append(system(system_prompt))
                 chat.append(user(user_prompt))
                 _, payload = chat.parse(schema)  # type: ignore[arg-type]
-                
-                latency_ms = (time.time() * 1000) - start_time_ms
-                logger.debug(f"API call successful ({latency_ms:.0f}ms)")
-                
-                # Record successful Grok API call
-                mon = _get_monitor()
-                if mon:
-                    mon.metrics.record_grok_call(latency_ms, error=False)
-                    from monitoring import EventType
-                    mon.activity.add_event(
-                        EventType.GROK_CALL,
-                        model=model,
-                        schema=schema.__name__,
-                        latency_ms=round(latency_ms, 1)
-                    )
-                
+                logger.debug("API call successful")
                 return payload
             except AttributeError:
                 # Fallback for potential API changes in newer versions
@@ -172,20 +149,7 @@ class GrokAdapter:
                 raise
 
         except Exception as e:
-            latency_ms = (time.time() * 1000) - start_time_ms
             logger.error(f"API call failed: {e}", exc_info=True)
-            
-            # Record failed Grok API call
-            mon = _get_monitor()
-            if mon:
-                mon.metrics.record_grok_call(latency_ms, error=True)
-                from monitoring import EventType
-                mon.activity.add_event(
-                    EventType.ERROR,
-                    error=f"Grok API: {str(e)[:100]}",
-                    model=model
-                )
-            
             return None
 
     # ---------------------------------------------------------------------
@@ -203,6 +167,17 @@ class GrokAdapter:
         if isinstance(payload, IntelSummary):
             return payload
         raise RuntimeError(f"Grok API call failed for summarize_user({handle}). No fallback available.")
+
+    def monitor_topic(self, topic: str) -> MonitorInsight:
+        payload = self._structured_call(
+            model=self.fast_model,
+            system_prompt="Provide a short monitor insight for a live-ops dashboard.",
+            user_prompt=f"Topic: {topic}\nNeed headline + impact score + tags.",
+            schema=MonitorInsight,
+        )
+        if isinstance(payload, MonitorInsight):
+            return payload
+        raise RuntimeError(f"Grok API call failed for monitor_topic({topic}). No fallback available.")
 
     def fact_check(self, url: str, text: str) -> FactCheckReport:
         payload = self._structured_call(
@@ -235,6 +210,15 @@ class GrokAdapter:
         """
         Generate a summary for a time-barred window of posts.
         Uses fast model for quick, structured summaries.
+        
+        Args:
+            topic: Topic name
+            ticks: List of Tick objects
+            start_time: Start of the time window
+            end_time: End of the time window
+        
+        Returns:
+            BarSummary with sentiment as float (0.0-1.0) and highlight_posts
         """
         if not ticks:
             return BarSummary(
@@ -242,10 +226,11 @@ class GrokAdapter:
                 key_themes=[],
                 sentiment=0.5,  # Neutral
                 post_count=0,
-                engagement_level="low"
+                engagement_level="low",
+                highlight_posts=[]
             )
 
-        # Select 1-2 highlight posts (prioritize by engagement, then recency)
+        # Select highlight posts (top 1-2 by engagement)
         highlight_posts = self._select_highlight_posts(ticks)
 
         # Create a readable representation of the posts
@@ -254,59 +239,71 @@ class GrokAdapter:
             for tick in ticks[:10]  # Limit to first 10 posts for summary
         ])
 
-        # Calculate how recent this window is
-        now = datetime.now(timezone.utc)
-        minutes_ago = int((now - end_time).total_seconds() / 60)
-        recency = f"{minutes_ago} minutes ago" if minutes_ago > 0 else "just now"
-        
-        # Format with date, time, and timezone
-        time_range = f"{start_time.strftime('%Y-%m-%d %H:%M')}-{end_time.strftime('%H:%M')} UTC"
+        time_range = f"{start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')}"
 
         user_prompt = f"""Topic: {topic}
-Current time: {now.strftime('%Y-%m-%d %H:%M')} UTC
-Time Window: {time_range} ({recency})
+Time Window: {time_range}
 Posts ({len(ticks)} total):
 
 {posts_text}
 
-{"... and " + str(len(ticks) - 10) + " more posts" if len(ticks) > 10 else ""}"""
+{"... and " + str(len(ticks) - 10) + " more posts" if len(ticks) > 10 else ""}
+
+Highlight post IDs: {highlight_posts}"""
 
         payload = self._structured_call(
             model=self.fast_model,
-            system_prompt="""You are summarizing a time window of social media posts for a live monitoring dashboard.
-Create a brief, structured summary focused on what happened in this specific time window.""",
+            system_prompt="""You are a critical analyst summarizing social media posts for a professional trading/monitoring dashboard.
+
+SENTIMENT SCORING (be critical and precise):
+- 0.0-0.2: Very negative (panic, crashes, scams exposed, major bad news)
+- 0.2-0.4: Negative (concerns, doubt, bearish sentiment, criticism)
+- 0.4-0.6: Neutral (mixed signals, factual updates, no clear direction)
+- 0.6-0.8: Positive (optimism, good news, bullish but measured)
+- 0.8-1.0: Very positive (euphoria, major wins, breakthrough news)
+
+CRITICAL ANALYSIS RULES:
+1. Promotional spam, giveaway scams, and bot-like content should LOWER sentiment (treat as noise/negative signal)
+2. "Moon" talk without substance = skeptical (0.5-0.6 max)
+3. Distinguish genuine news from hype - hype alone is NOT positive
+4. FUD (fear, uncertainty, doubt) without evidence = slight negative (0.4-0.5)
+5. Legitimate concerns or risks = reflect in lower sentiment
+6. Default to neutral (0.5) when content is mixed or unclear
+
+Be skeptical. Most crypto social media is noise. Only rate highly positive (>0.7) for genuine good news with substance.""",
             user_prompt=user_prompt,
             schema=BarSummary,
         )
 
         if isinstance(payload, BarSummary):
-            # Ensure post_count matches actual data and add highlight posts
+            # Ensure post_count matches actual data
             payload.post_count = len(ticks)
+            # Set highlight posts
             payload.highlight_posts = highlight_posts
             return payload
 
         raise RuntimeError(f"Grok API call failed for summarize_bar({topic}). No fallback available.")
-
-    def _select_highlight_posts(self, ticks: List[Tick]) -> Optional[List[str]]:
+    
+    def _select_highlight_posts(self, ticks: List[Tick]) -> List[str]:
         """
-        Select 1-2 most representative posts from the tick list.
-        Prioritizes by engagement metrics, then by recency.
+        Select 1-2 highlight posts based on engagement and recency.
+        
+        Returns:
+            List of post IDs (1-2 highlights)
         """
-        if len(ticks) <= 2:
-            # If 2 or fewer posts, include all of them
-            return [tick.id for tick in ticks]
-
-        # Calculate engagement score for each tick
+        if not ticks:
+            return []
+        
         def calculate_engagement(tick: Tick) -> int:
-            metrics = tick.metrics
+            metrics = tick.metrics or {}
             return (
-                metrics.get('retweet_count', 0) * 3 +  # Retweets are highly engaging
-                metrics.get('like_count', 0) * 2 +      # Likes show approval
-                metrics.get('reply_count', 0) * 4 +     # Replies show discussion
-                metrics.get('quote_count', 0) * 2       # Quotes spread content
+                metrics.get("like_count", 0) * 3 +
+                metrics.get("retweet_count", 0) * 5 +
+                metrics.get("reply_count", 0) * 2 +
+                metrics.get("quote_count", 0) * 4
             )
-
-        # Sort by engagement score (descending), then by timestamp (most recent first)
+        
+        # Sort by engagement (desc), then by recency (desc)
         sorted_ticks = sorted(
             ticks,
             key=lambda t: (calculate_engagement(t), t.timestamp),
@@ -333,36 +330,16 @@ Create a brief, structured summary focused on what happened in this specific tim
                 recommendations=["Continue monitoring for activity"]
             )
 
-        # Get current time for context
-        now = datetime.now(timezone.utc)
-        
-        # Create a summary of the bars with cleaner time formatting
-        # Format sentiment as a label for readability
-        def sentiment_label(s):
-            if s is None:
-                return "unknown"
-            if isinstance(s, (int, float)):
-                if s < 0.3:
-                    return f"negative ({s:.2f})"
-                elif s > 0.7:
-                    return f"positive ({s:.2f})"
-                else:
-                    return f"neutral ({s:.2f})"
-            return str(s)
-        
+        # Create a summary of the bars
         bars_summary = "\n".join([
             f"Bar {i+1} ({bar.get('start', 'unknown')}): {bar.get('summary', 'No summary')} "
-            f"({bar.get('post_count', 0)} posts, sentiment: {sentiment_label(bar.get('sentiment'))})"
-            for i, bar in enumerate(bars_data[-12:])  # Last 12 bars
+            f"({bar.get('post_count', 0)} posts)"
+            for i, bar in enumerate(bars_data[-12:])  # Last 12 bars (assuming 5min bars = 1 hour)
         ])
-        
-        total_posts = sum(b.get("post_count", 0) for b in bars_data)
 
         user_prompt = f"""Topic: {topic}
-Current time: {now.strftime('%Y-%m-%d %H:%M')} UTC
 Time Period: Last {lookback_hours} hour(s)
-Total posts across all bars: {total_posts}
-Bar Summaries ({len(bars_data)} total bars, most recent last):
+Bar Summaries ({len(bars_data)} total bars):
 
 {bars_summary}"""
 
@@ -423,6 +400,7 @@ Provide contextual analysis of trends, developments, and recommendations for mon
 __all__ = [
     "GrokAdapter",
     "IntelSummary",
+    "MonitorInsight",
     "FactCheckReport",
     "DigestOverview",
     "BarSummary",

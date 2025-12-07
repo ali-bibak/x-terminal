@@ -192,6 +192,125 @@ class TickStore:
             del self._tick_ids[topic]
 
 
+class BarStore:
+    """
+    Stores pre-computed bars per topic per resolution.
+    
+    Bars are generated periodically by BarScheduler and stored here.
+    GET requests read from this store for instant responses.
+    """
+    
+    def __init__(self, max_bars_per_resolution: int = 500):
+        """
+        Initialize BarStore.
+        
+        Args:
+            max_bars_per_resolution: Maximum bars to keep per topic/resolution
+        """
+        # Structure: {topic: {resolution: [bars sorted by start desc]}}
+        self._bars: Dict[str, Dict[str, List[Bar]]] = defaultdict(lambda: defaultdict(list))
+        self._max_bars = max_bars_per_resolution
+        self._lock = asyncio.Lock()
+    
+    async def add_bar(self, bar: Bar) -> None:
+        """Add a bar to the store."""
+        async with self._lock:
+            bars = self._bars[bar.topic][bar.resolution]
+            
+            # Check if bar with same start time already exists
+            existing_idx = None
+            for i, existing in enumerate(bars):
+                if existing.start == bar.start:
+                    existing_idx = i
+                    break
+            
+            if existing_idx is not None:
+                # Replace existing bar (update with new summary)
+                bars[existing_idx] = bar
+            else:
+                # Add new bar
+                bars.append(bar)
+                # Sort by start time descending (most recent first)
+                bars.sort(key=lambda b: b.start, reverse=True)
+                # Prune old bars
+                if len(bars) > self._max_bars:
+                    self._bars[bar.topic][bar.resolution] = bars[:self._max_bars]
+    
+    def add_bar_sync(self, bar: Bar) -> None:
+        """Synchronous version for non-async contexts."""
+        bars = self._bars[bar.topic][bar.resolution]
+        
+        # Check if bar with same start time already exists
+        existing_idx = None
+        for i, existing in enumerate(bars):
+            if existing.start == bar.start:
+                existing_idx = i
+                break
+        
+        if existing_idx is not None:
+            bars[existing_idx] = bar
+        else:
+            bars.append(bar)
+            bars.sort(key=lambda b: b.start, reverse=True)
+            if len(bars) > self._max_bars:
+                self._bars[bar.topic][bar.resolution] = bars[:self._max_bars]
+    
+    def get_bars(
+        self, 
+        topic: str, 
+        resolution: str, 
+        limit: int = 50
+    ) -> List[Bar]:
+        """
+        Get pre-computed bars for a topic at a resolution.
+        
+        Args:
+            topic: Topic label
+            resolution: Time resolution
+            limit: Maximum bars to return
+        
+        Returns:
+            List of bars, most recent first
+        """
+        bars = self._bars.get(topic, {}).get(resolution, [])
+        return bars[:limit]
+    
+    def get_latest_bar(self, topic: str, resolution: str) -> Optional[Bar]:
+        """Get the most recent bar for a topic at a resolution."""
+        bars = self.get_bars(topic, resolution, limit=1)
+        return bars[0] if bars else None
+    
+    def get_bar_count(self, topic: str, resolution: str) -> int:
+        """Get number of stored bars for a topic/resolution."""
+        return len(self._bars.get(topic, {}).get(resolution, []))
+    
+    def get_all_resolutions(self, topic: str) -> List[str]:
+        """Get all resolutions that have bars for a topic."""
+        return list(self._bars.get(topic, {}).keys())
+    
+    def clear_topic(self, topic: str) -> None:
+        """Remove all bars for a topic."""
+        if topic in self._bars:
+            del self._bars[topic]
+    
+    def clear_resolution(self, topic: str, resolution: str) -> None:
+        """Remove all bars for a specific resolution."""
+        if topic in self._bars and resolution in self._bars[topic]:
+            del self._bars[topic][resolution]
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get storage statistics."""
+        stats = {
+            "topics": len(self._bars),
+            "by_topic": {}
+        }
+        for topic, resolutions in self._bars.items():
+            stats["by_topic"][topic] = {
+                res: len(bars) for res, bars in resolutions.items()
+            }
+        return stats
+
+
 class BarGenerator:
     """
     Generates bars on-demand from raw ticks.
@@ -654,6 +773,7 @@ def get_polling_window(min_age_seconds: int = 15) -> tuple[datetime, datetime]:
 __all__ = [
     "Bar",
     "TickStore",
+    "BarStore",
     "BarGenerator",
     "DigestService",
     "RESOLUTION_MAP",

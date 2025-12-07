@@ -499,6 +499,100 @@ async def poll_all_topics(poller: TickPoller = Depends(get_tick_poller)):
 
 
 # ----------------------------------------------------------------------------
+# Backfill (historical bars with summaries)
+# ----------------------------------------------------------------------------
+
+class BackfillRequest(BaseModel):
+    """Request for backfilling historical bars."""
+    resolution: str = Field(default="1h", description="Resolution for bars (e.g., '15s', '1m', '1h')")
+    count: int = Field(default=5, ge=1, le=100, description="Number of bars to generate")
+    generate_summaries: bool = Field(default=True, description="Generate Grok summaries (slower)")
+
+
+class BackfillResponse(BaseModel):
+    """Response from backfill operation."""
+    success: bool
+    message: str
+    bars_generated: int = 0
+    bars_with_summaries: int = 0
+    resolution: str = ""
+    time_range: Optional[str] = None
+
+
+@router.post("/topics/{topic_id}/backfill", response_model=BackfillResponse)
+async def backfill_bars(
+    topic_id: str,
+    request: BackfillRequest,
+    manager: TopicManager = Depends(get_topic_manager)
+):
+    """
+    🕐 Generate historical bars with summaries (on-demand, slower).
+    
+    Use this to backfill bars when you need historical data with summaries,
+    e.g., on startup to get the last 5 hourly summaries.
+    
+    This bypasses the normal fast BarStore route and generates fresh bars
+    with Grok summaries for each.
+    
+    **Note**: This is slower than normal GET /bars because it calls Grok
+    for each bar's summary. Use for initial data load, not real-time.
+    
+    Example:
+        POST /topics/bitcoin/backfill
+        {"resolution": "1h", "count": 5, "generate_summaries": true}
+    """
+    topic = manager.get_topic(topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail=f"Topic '{topic_id}' not found")
+    
+    if request.resolution not in RESOLUTION_MAP:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid resolution: {request.resolution}. Valid: {list(RESOLUTION_MAP.keys())}"
+        )
+    
+    try:
+        # Generate bars directly from tick data (bypassing BarStore cache)
+        bars = await manager.bar_generator.generate_bars_async(
+            topic=topic.label,
+            resolution=request.resolution,
+            limit=request.count,
+            generate_summaries=request.generate_summaries
+        )
+        
+        # Store in BarStore for future fast access
+        for bar in bars:
+            await manager.bar_store.add_bar(bar)
+        
+        bars_with_summaries = sum(1 for b in bars if b.summary is not None)
+        
+        # Calculate time range
+        if bars:
+            oldest = bars[-1].start.strftime('%Y-%m-%d %H:%M')
+            newest = bars[0].end.strftime('%Y-%m-%d %H:%M')
+            time_range = f"{oldest} to {newest}"
+        else:
+            time_range = None
+        
+        return BackfillResponse(
+            success=True,
+            message=f"Generated {len(bars)} {request.resolution} bars",
+            bars_generated=len(bars),
+            bars_with_summaries=bars_with_summaries,
+            resolution=request.resolution,
+            time_range=time_range
+        )
+        
+    except Exception as e:
+        logger.error(f"Backfill failed for {topic_id}: {e}")
+        return BackfillResponse(
+            success=False,
+            message=str(e),
+            resolution=request.resolution
+        )
+
+
+# ----------------------------------------------------------------------------
 # Digest
 # ----------------------------------------------------------------------------
 
@@ -976,6 +1070,52 @@ async def get_topics_status(manager: TopicManager = Depends(get_topic_manager)):
             "total_ticks": total_ticks,
         },
         "topics": topic_stats,
+    }
+
+
+@router.get("/debug/ticks/{topic_id}", tags=["Debug"])
+async def get_tick_debug(
+    topic_id: str,
+    limit: int = Query(default=10, ge=1, le=100),
+    start: Optional[str] = Query(default=None, description="Start time ISO format"),
+    end: Optional[str] = Query(default=None, description="End time ISO format"),
+    manager: TopicManager = Depends(get_topic_manager)
+):
+    """Debug endpoint to inspect tick timestamps."""
+    from datetime import datetime, timezone
+    
+    topic = manager.get_topic(topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail=f"Topic '{topic_id}' not found")
+    
+    # Parse optional time filters
+    start_dt = datetime.fromisoformat(start.replace('Z', '+00:00')) if start else None
+    end_dt = datetime.fromisoformat(end.replace('Z', '+00:00')) if end else None
+    
+    # Get all ticks for this topic (with optional time filter)
+    ticks = manager.tick_store.get_ticks(topic.label, start=start_dt, end=end_dt)
+    time_range = manager.tick_store.get_time_range(topic.label)
+    
+    return {
+        "topic_id": topic_id,
+        "topic_label": topic.label,
+        "query_start": start,
+        "query_end": end,
+        "total_ticks_in_range": len(ticks),
+        "total_ticks_all": manager.tick_store.get_tick_count(topic.label),
+        "time_range": {
+            "oldest": time_range[0].isoformat() if time_range else None,
+            "newest": time_range[1].isoformat() if time_range else None,
+        },
+        "sample_ticks": [
+            {
+                "id": t.id,
+                "timestamp": t.timestamp.isoformat(),
+                "author": t.author,
+                "topic": t.topic,
+            }
+            for t in ticks[-limit:]  # Most recent ticks
+        ]
     }
 
 
